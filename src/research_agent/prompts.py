@@ -9,7 +9,11 @@ import html
 import re
 from collections.abc import Iterable
 
-PROMPT_VERSION = "onc-2026.11.3"  # .3: writer/repair cite E ids from note evidence, never N note ids
+# .2: coverage follow-ups name their aspect (per-aspect cap)
+# .3: writer/repair cite E ids from note evidence, never N note ids
+# .4: repair drops citations that don't state the claim; bottom line rewritten from verified items only
+#     (merged from fix/verification-checks, which had used ".2" independently)
+PROMPT_VERSION = "onc-2026.11.4"
 
 _TAG_RE = re.compile(r"</?\s*untrusted_(?:source|note)[^>]*>", re.I)
 
@@ -219,7 +223,9 @@ REPAIR_SYSTEM = f"""Some claims in an oncology update brief failed citation chec
 
 For each failed claim, using ONLY the notes, either:
 - revise it so every statement and number matches a note (fix numbers, copy source sentences exactly, cite other
-  evidence ids), or
+  evidence ids, and REMOVE any citation whose excerpt was judged partial or unsupported unless you change the claim so
+  that excerpt states it), or
+- if cited sources disagree, say how they differ in the text and set claim_type to "uncertain", or
 - set claim_type to "uncertain" and say in the text what is not established.
 Keep the claim_id. Same item fields as before (text, claim_type, evidence_ids, date, evidence_level, population, numbers).
 {CITATION_RULE}
@@ -238,6 +244,24 @@ def repair_user(brief: dict, failed: list[dict], notes: list[dict], index_rows: 
     return (f"Brief:\n{brief_text(brief)}\n\nFailed claims:\n" + "\n\n".join(parts)
             + f"\n\nEvidence index (trusted metadata):\n{evidence_index(index_rows)}"
             + f"\n\nNotes (derived from untrusted web data):\n\n{blocks}")
+
+
+# --- 8b. bottom line from verified items (STRONG) ------------------------------
+
+BOTTOM_LINE_SYSTEM = f"""You write the one-sentence bottom line of an oncology update brief. {SCOPE_RULE} {UNTRUSTED_RULE}
+
+Use ONLY the verified items below; each was checked against its sources. Do not add any fact, number, date, drug
+or population that is not in them. Summarize what changed since the anchor date. Give a confidence (high, moderate,
+low) and a short reason (e.g. the evidence level of the items).
+
+Reply with only JSON: {{"text": "...", "confidence": "moderate", "reason": "..."}}"""
+
+
+def bottom_line_user(brief: dict, items: list[dict]) -> str:
+    lines = [f"- [{c.get('item_date') or 'date not stated'}] {_clean(c['text'])} "
+             f"(evidence level: {_clean(c.get('evidence_level') or 'not stated')})" for c in items]
+    return (f"Brief:\n{brief_text(brief)}\n\n<untrusted_note id=\"verified_items\">\n" + "\n".join(lines)
+            + "\n</untrusted_note>\n\nWrite the JSON bottom line now.")
 
 
 # --- 7. verifier (FAST) --------------------------------------------------------

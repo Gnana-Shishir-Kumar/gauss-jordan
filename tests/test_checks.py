@@ -21,7 +21,7 @@ def test_number_check_passes_and_fails():
     assert check_numbers("PFS 23.7 vs 16.6 months (HR 0.7)", cit) == (True, [])
     ok, problems = check_numbers("PFS 24.1 months (HR 0.70)", cit)
     assert not ok and "24.1" in problems[-1]
-    fake = [{"evidence_id": 1, "excerpt": EXCERPT, "source_sentence": "HR 0.68 overall."}]
+    fake = [{"evidence_id": 1, "excerpt": EXCERPT, "source_sentence": "The HR was 0.68 overall."}]
     ok, problems = check_numbers("HR 0.68", fake)
     assert not ok and "not in the excerpt" in problems[0]
     assert check_numbers("No numbers here", []) == (True, [])

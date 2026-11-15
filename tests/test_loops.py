@@ -236,7 +236,8 @@ def test_unsupported_citation_stays_flagged(agent, conn):
     assert all(x["verdict"] == "unsupported" for c in r["claims"] for x in c["citations"])
     assert "[FLAGGED: not verified]" in r["task"]["final_answer"]
     assert r["task"]["status"] == "insufficient_evidence"
-    assert r["task"]["answer_json"]["bottom_line"]["confidence"] == "low"
+    assert r["task"]["answer_json"]["bottom_line"] is None  # nothing verified -> no unverified bottom line
+    assert "No bottom line" in r["task"]["final_answer"]
 
 
 def test_number_missing_from_source_sentence_is_repaired(agent, conn):

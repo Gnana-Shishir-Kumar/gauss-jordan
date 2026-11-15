@@ -54,8 +54,25 @@ def test_cache_ttl(conn):
     assert storage.get_search_cache(conn, "k", 7) == [{"url": "u"}]
     conn.execute("UPDATE search_cache SET fetched_at = datetime('now', '-8 days')")
     assert storage.get_search_cache(conn, "k", 7) is None
-    storage.put_extract_cache(conn, {"https://a": "body"})
-    assert storage.get_extract_cache(conn, ["https://a", "https://b"], 7) == {"https://a": "body"}
+    storage.put_extract_cache(conn, {"https://a": "body"}, "q1")
+    assert storage.get_extract_cache(conn, ["https://a", "https://b"], "q1", 7) == {"https://a": "body"}
+    # Tavily extract returns query-specific chunks, so another question must not reuse them.
+    assert storage.get_extract_cache(conn, ["https://a"], "q2", 7) == {}
+
+
+def test_v2_database_migrates_by_rebuilding_extract_cache(tmp_path):
+    path = str(tmp_path / "old.db")
+    c = storage.connect(path)
+    c.execute("DROP TABLE extract_cache")
+    c.execute("CREATE TABLE extract_cache (url TEXT PRIMARY KEY, content TEXT NOT NULL, fetched_at TEXT)")
+    c.execute("INSERT INTO extract_cache VALUES ('https://a', 'old chunks', '2026-11-15 00:00:00')")
+    c.execute("PRAGMA user_version = 2")
+    c.commit()
+    c.close()
+    c = storage.connect(path)
+    assert c.execute("PRAGMA user_version").fetchone()[0] == storage.SCHEMA_VERSION
+    assert storage.get_extract_cache(c, ["https://a"], "", 7) == {}
+    c.close()
 
 
 def test_citations_sentences_and_totals(conn):
