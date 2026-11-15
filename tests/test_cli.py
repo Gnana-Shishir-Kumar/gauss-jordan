@@ -40,6 +40,13 @@ def test_cli_blocks_identifiers(monkeypatch, tmp_path, capsys):
     assert "patient identifiers" in capsys.readouterr().err
 
 
+def test_cli_blocks_identifiers_even_without_keys(monkeypatch, tmp_path, capsys):
+    from research_agent.config import Settings
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings())
+    assert cli.main(["My patient John Smith has EGFR NSCLC", "--db", str(tmp_path / "t.db")]) == 6
+    assert "patient identifiers" in capsys.readouterr().err
+
+
 def test_cli_missing_keys(monkeypatch, tmp_path, capsys):
     from research_agent.config import Settings
     monkeypatch.setattr(cli, "get_settings", lambda: Settings())

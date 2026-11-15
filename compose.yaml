@@ -1,0 +1,40 @@
+# Run on a VM:   docker compose up -d --build                 (UI on 127.0.0.1:8501, reach it via SSH tunnel)
+# With HTTPS:    DOMAIN=briefs.example.org in .env, then
+#                docker compose --profile https up -d --build  (Caddy gets a certificate automatically)
+# CLI on the VM: docker compose exec app research "question"
+services:
+  app:
+    build: .
+    image: oncology-briefs:latest
+    restart: unless-stopped
+    env_file:
+      - path: .env  # NEBIUS_API_KEY, TAVILY_API_KEY (and optional model overrides)
+        required: false
+    environment:
+      RESEARCH_DB_PATH: /data/research.db
+      # The UI refuses to start without a password in the cloud.
+      APP_PASSWORD: ${APP_PASSWORD:?Set APP_PASSWORD in .env before deploying}
+    volumes:
+      - research-data:/data
+    ports:
+      - "127.0.0.1:8501:8501"  # localhost only on the VM; public traffic goes through Caddy
+
+  caddy:
+    image: caddy:2.8.4
+    profiles: ["https"]
+    restart: unless-stopped
+    depends_on: [app]
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env to use the https profile}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  research-data:
+  caddy-data:
+  caddy-config:

@@ -100,6 +100,48 @@ uv run python evals/run_evals.py # 15 questions, live
 uv run python evals/compare.py   # drift gate against evals/baseline.json
 ```
 
+## Deploy to the cloud (container on a VM, e.g. Nebius AI Cloud)
+
+One image runs the Streamlit UI. The same image has the `research` CLI, and both share one SQLite database on a persistent volume, so run history survives restarts and redeploys.
+
+**1. Create a VM.**
+- An Ubuntu CPU instance with a public IP and your SSH key is enough, because all inference runs on Token Factory.
+- Open ports 22, 80 and 443.
+- Install Docker Engine with the Compose plugin.
+
+**2. Get the code and configure it.**
+```bash
+git clone https://github.com/Gnana-Shishir-Kumar/gauss-jordan.git && cd gauss-jordan
+cp .env.example .env    # set NEBIUS_API_KEY, TAVILY_API_KEY, APP_PASSWORD (+ DOMAIN for HTTPS)
+```
+`APP_PASSWORD` is required: compose refuses to start the app without it. Keys are read from `.env` at runtime and are never put into the image.
+
+**3. Start it.**
+```bash
+docker compose up -d --build                   # UI on the VM at 127.0.0.1:8501 only
+docker compose --profile https up -d --build   # plus Caddy: https://$DOMAIN with an automatic certificate
+```
+- **Without a domain:** reach the UI through an SSH tunnel. Run `ssh -L 8501:localhost:8501 user@VM_IP`, then open http://localhost:8501.
+- **With a domain:** point its DNS A record at the VM and use the `https` profile. Caddy terminates TLS and proxies to the app.
+- **Either way,** the app asks for `APP_PASSWORD` once per browser session.
+
+**4. Use the CLI on the VM** (same database as the UI, so `--show` works on runs started in the browser):
+```bash
+docker compose exec app python scripts/list_models.py
+docker compose exec app research "What has changed for first-line EGFR-mutant metastatic NSCLC since 2024-06-01?"
+docker compose exec app research --show 3 --export ris --out /data/task3.ris
+docker compose cp app:/data/task3.ris .
+```
+
+**Operations:**
+| Task | Command |
+|---|---|
+| Update | `git pull && docker compose up -d --build` |
+| Logs | `docker compose logs -f app` |
+| Back up history | `docker compose cp app:/data/research.db ./backup.db` |
+
+The image runs as a non-root user and has a health check on `/_stcore/health`.
+
 ## Architecture
 
 ```mermaid

@@ -16,7 +16,7 @@ from .config import get_settings
 from .engine import prepare, run
 from .engine.orchestrator import default_clients, load_report
 from .exports import to_csv, to_ris
-from .privacy import IdentifierError
+from .privacy import IdentifierError, check_question
 from .render import USE_LIMITS, format_report
 
 EXIT = {"done": 0, "insufficient_evidence": 3, "needs_clarification": 4}
@@ -83,6 +83,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.question and args.run is None:
         p.error("a question is required (or --run / --show TASK_ID)")
+    if args.question:
+        try:  # privacy check first: needs no keys and stores nothing
+            check_question(args.question)
+        except IdentifierError as exc:
+            print(str(exc), file=sys.stderr)
+            return 6
     try:
         llm, search = default_clients(settings)
     except RuntimeError as exc:

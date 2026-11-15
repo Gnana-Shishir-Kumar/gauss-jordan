@@ -7,7 +7,10 @@ SQLite for progress, so a page refresh does not interrupt a run.
 from __future__ import annotations
 
 import asyncio
+import hmac
+import os
 import threading
+import time
 
 import streamlit as st
 
@@ -35,6 +38,24 @@ LEVEL_ICON = {"info": ":material/check:", "warning": ":material/warning:", "erro
 
 def md(text) -> str:
     return str(text or "").replace("$", "\\$")
+
+
+def password_gate() -> bool:
+    """If APP_PASSWORD is set (required in the container), ask for it once per browser session."""
+    expected = os.environ.get("APP_PASSWORD", "")
+    if not expected or st.session_state.get("authed"):
+        return True
+    st.title("Oncology Update Briefs")
+    st.caption(USE_LIMITS)
+    with st.form("login"):
+        given = st.text_input("Password", type="password")
+        if st.form_submit_button("Sign in", type="primary"):
+            if hmac.compare_digest(given.encode(), expected.encode()):
+                st.session_state.authed = True
+                st.rerun()
+            time.sleep(1)  # slow down guessing
+            st.error("Wrong password.")
+    return False
 
 
 @st.cache_resource
@@ -209,6 +230,8 @@ def show_trace(report: dict) -> None:
 def main() -> None:
     st.set_page_config(page_title="Oncology Update Briefs", page_icon=":material/biotech:", layout="wide")
     settings = get_settings()
+    if not password_gate():
+        return
     conn = get_conn(settings.db_path)
 
     with st.sidebar:
