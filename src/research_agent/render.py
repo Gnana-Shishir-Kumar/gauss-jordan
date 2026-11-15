@@ -15,17 +15,23 @@ USE_LIMITS = (
 )
 NO_IDENTIFIERS = "Do not enter patient identifiers (names, record numbers, dates of birth). Ask about the clinical topic."
 
-_RANK = ["supported", "partial", "unsupported", "source_unavailable"]
-SUPPORTING = ("supported", "partial")
+# Only "supported" counts as verified. "partial" means different numbers, dates or populations, so it is flagged.
+SUPPORTING = ("supported",)
+_SEVERITY = {"supported": 0, "partial": 1, "unsupported": 2}
 
 
 def claim_verdict(claim: dict) -> str:
-    """Overall verdict for a claim: the best verdict among its citations."""
-    verdicts = {c.get("verdict") for c in claim.get("citations", []) if c.get("verdict")}
-    for v in _RANK:
-        if v in verdicts:
-            return v
-    return "uncited" if not claim.get("citations") else "unverified"
+    """Overall verdict for a claim: the WORST verdict among its checked citations, so one supporting source can't
+    hide a source that contradicts or doesn't state the claim. source_unavailable citations (login walls) are
+    ignored when another citation was checked."""
+    cits = claim.get("citations", [])
+    if not cits:
+        return "uncited"
+    verdicts = [c.get("verdict") for c in cits]
+    checked = [v for v in verdicts if v in _SEVERITY]
+    if checked:
+        return max(checked, key=_SEVERITY.__getitem__)
+    return "source_unavailable" if "source_unavailable" in verdicts else "unverified"
 
 
 def is_flagged(claim: dict) -> bool:
@@ -56,12 +62,15 @@ def sort_items(claims: list[dict]) -> list[dict]:
     return sorted(claims, key=lambda c: (c.get("item_date") or "", -c["position"]), reverse=True)
 
 
-def _item_lines(n: int, c: dict) -> list[str]:
+def _item_lines(n: int, c: dict, anchor: str | None = None) -> list[str]:
     cits = c.get("citations", [])
     types = sorted({type_label(x.get("source_type")) for x in cits}) or ["no source"]
     tiers = sorted({x.get("trust_tier") for x in cits if x.get("trust_tier")})
     verdict = claim_verdict(c)
     flag = "  [FLAGGED: not verified]" if is_flagged(c) else ""
+    from .engine.checks import before_anchor  # local import: engine imports this module
+    if before_anchor(c.get("item_date"), anchor):
+        flag += f"  [DATED BEFORE {anchor}: not new]"
     lines = [f"{n}. {c.get('item_date') or 'date not stated'} · {', '.join(types)} · "
              f"{', '.join(tier_label(t).split(' · ')[0] for t in tiers) or 'no tier'}{flag}",
              f"   What changed: {c['text']}  [{c['claim_type']}; {verdict.replace('_', ' ')}]",
@@ -95,10 +104,10 @@ def format_answer(task: dict, claims: list[dict], answer: dict) -> str:
     if not new:
         out.append("No verified developments found.")
     for i, c in enumerate(new, 1):
-        out += _item_lines(i, c)
+        out += _item_lines(i, c, task.get("anchor_date"))
     conflicts = [c for c in claims if c.get("section") == "conflict"]
     out += ["", "3. SOURCES DISAGREE"]
-    out += [line for i, c in enumerate(conflicts, 1) for line in _item_lines(i, c)] or ["No conflicts found."]
+    out += [line for i, c in enumerate(conflicts, 1) for line in _item_lines(i, c, task.get("anchor_date"))] or ["No conflicts found."]
     out += ["", "4. NOT YET ESTABLISHED"] + [f"- {x}" for x in answer.get("not_established") or ["(none listed)"]]
     out += ["", "5. CHECK BEFORE ACTING"] + [f"- {x}" for x in answer.get("check_before_acting") or ["(none listed)"]]
     out += ["", "6. " + DISCLAIMER, USE_LIMITS]

@@ -16,7 +16,7 @@ from ..backends.tavily import TavilyBackend
 from ..config import Settings
 from ..privacy import check_question
 from ..prompts import PROMPT_VERSION
-from ..render import SUPPORTING, claim_verdict, format_answer, is_flagged
+from ..render import SUPPORTING, format_answer, is_flagged
 from ..sources import is_peer_reviewed, is_preliminary
 from .brief import make_brief
 from .context import EventCallback, RunContext, describe_error
@@ -24,7 +24,7 @@ from .coverage import assess_coverage
 from .planner import plan_queries
 from .research import ResearchState, research_round
 from .verifier import verify_claims
-from .writer import persist_draft, repair_claims, write_draft
+from .writer import persist_draft, repair_claims, settle_bottom_line, verified_items, write_draft
 
 
 def default_clients(settings: Settings) -> tuple[LLMClient, SearchBackend]:
@@ -166,10 +166,10 @@ async def _run(ctx: RunContext, brief: dict) -> tuple[str, str]:
         if not revised:
             break
         await verify_claims(ctx, revised, phase="repair")
-    return await _finalize(ctx, draft)
+    return await _finalize(ctx, brief, draft)
 
 
-async def _finalize(ctx: RunContext, draft) -> tuple[str, str]:
+async def _finalize(ctx: RunContext, brief: dict, draft) -> tuple[str, str]:
     conn, tid = ctx.conn, ctx.task_id
     for c in storage.get_claims(conn, tid):
         supporting = [x for x in c["citations"] if x.get("verdict") in SUPPORTING]
@@ -181,7 +181,7 @@ async def _finalize(ctx: RunContext, draft) -> tuple[str, str]:
         storage.update_claim(conn, c["id"], **fields)
 
     claims = storage.get_claims(conn, tid)
-    bl = draft.bottom_line.model_dump() if draft.bottom_line else None
+    bl = await settle_bottom_line(ctx, brief, draft, claims)
     if bl:
         strong = any(x.get("verdict") == "supported" and x.get("trust_tier") in (1, 2)
                      and not is_preliminary(x.get("source_type")) for c in claims for x in c["citations"])
@@ -194,7 +194,7 @@ async def _finalize(ctx: RunContext, draft) -> tuple[str, str]:
         elif caveat and bl["confidence"] == "high":
             bl.update(confidence="moderate",
                       reason=base + "Capped at moderate: some items are unverified or sources disagree.")
-    verified = [c for c in claims if c["section"] == "new" and claim_verdict(c) in SUPPORTING]
+    verified = verified_items(claims, brief.get("anchor_date"))
     note = draft.insufficiency_note if not draft.sufficient else None
     if not verified and not note:
         note = "none of the developments could be verified against their cited sources."

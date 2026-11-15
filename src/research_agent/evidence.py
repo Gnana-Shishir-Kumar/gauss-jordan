@@ -43,6 +43,13 @@ def normalize_url(url: str) -> str:
     return urlunsplit((scheme, netloc, path, urlencode(sorted(query)), ""))
 
 
+def site_of(domain: str) -> str:
+    """Registrable site for independence checks: pubmed.ncbi.nlm.nih.gov and ncbi.nlm.nih.gov are one site (nih.gov),
+    accessdata.fda.gov and fda.gov are one site. Every allowlisted domain has a two-label registrable name."""
+    parts = (domain or "").lower().strip(".").split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else (domain or "")
+
+
 def domain_of(url: str) -> str:
     host = (urlsplit(url).hostname or "").lower()
     return host[4:] if host.startswith("www.") else host
@@ -58,11 +65,20 @@ def terms(text: str) -> set[str]:
 
 
 def normalize_query(query: str) -> str:
-    return " ".join(sorted(terms(query)))
+    """Cache key form: lowercase, single spaces. Nothing else is dropped or reordered, because short tokens and
+    order carry clinical meaning ("stage II" vs "stage IV", "PD-1" vs "PD-L1", "HR-positive HER2-negative")."""
+    return " ".join((query or "").lower().split())
+
+
+def query_terms(text: str) -> set[str]:
+    """Terms for comparing search queries: keeps short tokens (ii, iv, 19) and hyphen/slash compounds (pd-l1,
+    hr-positive, cdk4/6) whole, so clinically different queries don't look like duplicates."""
+    toks = re.findall(r"[a-z0-9]+(?:[-/][a-z0-9]+)*", (text or "").lower())
+    return {t for t in toks if t not in _STOPWORDS}
 
 
 def jaccard(a: str, b: str) -> float:
-    ta, tb = terms(a), terms(b)
+    ta, tb = query_terms(a), query_terms(b)
     if not ta or not tb:
         return 0.0
     return len(ta & tb) / len(ta | tb)

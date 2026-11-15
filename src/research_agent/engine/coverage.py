@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .. import prompts, storage
-from ..evidence import near_duplicate
+from ..evidence import near_duplicate, site_of
 from ..schemas import Coverage
 from .context import RunContext, describe_error
 
@@ -38,7 +38,7 @@ async def assess_coverage(ctx: RunContext, brief: dict, previous: list[str]) -> 
     aspects = []
     for a in res.data.aspects:
         ids = [i for i in a.evidence_ids if i in kept]
-        domains = sorted({kept[i]["domain"] for i in ids})
+        domains = sorted({site_of(kept[i]["domain"]) for i in ids})  # subdomains of one site count once
         aspects.append({"aspect": a.aspect, "status": a.status, "evidence_ids": ids, "domains": domains,
                         "independent": len(domains) >= lim.min_independent_sources})
     named = {a["aspect"].lower() for a in aspects}
