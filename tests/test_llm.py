@@ -71,6 +71,25 @@ def test_gives_up_after_two_invalid_replies():
         call(llm, Draft)
 
 
+def test_truncated_output_is_reported_and_limit_is_configurable():
+    from research_agent.config import Settings
+
+    class Truncating(FakeCompletions):
+        async def create(self, **kwargs):
+            self.kwargs.append(kwargs)
+            r = resp('{"sufficient": true, "items": [{"text": "cut off')
+            r.choices[0].finish_reason = "length"
+            return r
+
+    comp = Truncating([])
+    llm = TokenFactoryLLM(SimpleNamespace(chat=SimpleNamespace(completions=comp)), NET, max_tokens=16384)
+    with pytest.raises(LLMOutputError, match="hit the 16384-token limit"):
+        call(llm, Draft)
+    assert comp.kwargs[0]["max_tokens"] == 16384
+    s = Settings(nebius_api_key="k")
+    assert TokenFactoryLLM.from_settings(s).max_tokens == s.network.llm_max_tokens
+
+
 def test_retries_transient_errors():
     llm, comp = make([openai.APIConnectionError(request=REQ), '{"sufficient": false, "claims": []}'])
     r = call(llm, Draft)

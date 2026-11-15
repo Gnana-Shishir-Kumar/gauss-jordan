@@ -60,8 +60,46 @@ def test_stops_at_max_rounds(agent, conn):
                 "follow_up_queries": [f"unique angle number{i} alpha{i} beta{i}"]}
 
     r = agent.full(FakeLLM(conn, Coverage=always_thin), FakeSearch())
-    assert max(s["round"] for s in r["sub_queries"]) == 3
+    assert max(s["round"] for s in r["sub_queries"]) == agent.settings.limits.max_rounds == 2
     assert r["task"]["stop_reason"] == "max_rounds"
+
+
+def test_follow_ups_capped_per_aspect(agent, conn):
+    n = itertools.count()
+
+    def many(call):
+        if next(n):
+            from conftest import h_coverage_complete
+            return h_coverage_complete(call)
+        return {"aspects": [{"aspect": "safety communications", "status": "thin"},
+                            {"aspect": "trial results", "status": "thin"}],
+                "follow_up_queries": [
+                    {"aspect": "safety communications", "query": "drugx FDA safety communication 2025"},
+                    {"aspect": "safety communications", "query": "drugx boxed warning label update"},
+                    {"aspect": "safety communications", "query": "drugx interstitial lung disease alert"},
+                    {"aspect": "trial results", "query": "drugx overall survival readout"},
+                ]}
+
+    r = agent.full(FakeLLM(conn, Coverage=many), FakeSearch())
+    round2 = [s["text"] for s in r["sub_queries"] if s["round"] == 2]
+    assert round2 == ["drugx FDA safety communication 2025", "drugx overall survival readout"]
+    capped = trace_steps(r, "coverage")[0]["detail"]["skipped_by_aspect_cap"]
+    assert [c["reason"] for c in capped] == ["per-aspect cap", "per-aspect cap"]
+
+
+def test_no_follow_up_for_an_aspect_already_covered(agent, conn):
+    from conftest import h_coverage_complete
+
+    def covered_but_asks(call):
+        out = h_coverage_complete(call)
+        out["aspects"].append({"aspect": "safety communications", "status": "thin"})
+        out["follow_up_queries"] = [{"aspect": "regulatory approvals", "query": "drugx approval news"}]
+        return out
+
+    r = agent.full(FakeLLM(conn, Coverage=covered_but_asks), FakeSearch())
+    assert r["task"]["stop_reason"] == "no_new_queries"
+    capped = trace_steps(r, "coverage")[0]["detail"]["skipped_by_aspect_cap"]
+    assert capped[0]["reason"] == "aspect already covered"
 
 
 def test_stops_when_round_adds_too_little(agent, conn):

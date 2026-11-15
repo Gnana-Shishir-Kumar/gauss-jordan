@@ -9,7 +9,7 @@ import html
 import re
 from collections.abc import Iterable
 
-PROMPT_VERSION = "onc-2026.11.1"
+PROMPT_VERSION = "onc-2026.11.2"  # .2: coverage follow-ups name their aspect (per-aspect cap)
 
 _TAG_RE = re.compile(r"</?\s*untrusted_(?:source|note)[^>]*>", re.I)
 
@@ -143,7 +143,7 @@ def notes_user(brief: dict, query: str, rows: list[dict]) -> str:
 
 # --- 5. coverage (STRONG) ------------------------------------------------------
 
-def coverage_system(max_queries: int) -> str:
+def coverage_system(max_queries: int, per_aspect: int = 1) -> str:
     return f"""You check whether research notes cover an oncology brief. {UNTRUSTED_RULE}
 
 For EVERY aspect in the brief, return its status:
@@ -151,12 +151,13 @@ For EVERY aspect in the brief, return its status:
 - "thin": little or no relevant evidence;
 - "conflict": sources disagree.
 List the evidence ids that support each aspect.
-Then propose up to {max_queries} follow-up web search queries, ONLY for thin or conflicting aspects. They must differ
-from the previous queries listed. Use [] if nothing needs follow-up.
+Then propose follow-up web search queries ONLY for thin or conflicting aspects: at most {per_aspect} per aspect and
+{max_queries} in total. Name the aspect each query is for, exactly as written above. Queries must differ from the
+previous queries listed and from each other (not rewordings of the same search). Use [] if nothing needs follow-up.
 
 Reply with only JSON:
 {{"aspects": [{{"aspect": "...", "status": "thin", "evidence_ids": [3], "note": "..."}}],
-  "follow_up_queries": ["..."]}}"""
+  "follow_up_queries": [{{"aspect": "...", "query": "..."}}]}}"""
 
 
 def coverage_user(brief: dict, notes: list[dict], index_rows: list[dict], previous: list[str]) -> str:

@@ -26,4 +26,6 @@ packages = ["src/research_agent"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["live: hits real Token Factory and Tavily APIs (skipped without keys)"]
+# Live tests spend API credits: excluded by default, run them with `pytest -m live` (the last -m wins).
+addopts = ["-m", "not live"]
+markers = ["live: hits real Token Factory and Tavily APIs (needs keys; run with -m live)"]

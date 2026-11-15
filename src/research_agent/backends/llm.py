@@ -76,7 +76,7 @@ class TokenFactoryLLM:
             timeout=settings.network.llm_timeout_s,
             max_retries=0,  # retries are handled by with_retry so there is one policy
         )
-        return cls(client, settings.network)
+        return cls(client, settings.network, max_tokens=settings.network.llm_max_tokens)
 
     async def _create(self, model: str, messages: list[dict]) -> Any:
         import openai
@@ -112,12 +112,15 @@ class TokenFactoryLLM:
         in_tok = out_tok = 0
         start = time.perf_counter()
         last: ValidationError | None = None
+        truncated = False
         for attempt in (1, 2):
             resp = await self._create(model, messages)
             usage = getattr(resp, "usage", None)
             in_tok += int(getattr(usage, "prompt_tokens", 0) or 0)
             out_tok += int(getattr(usage, "completion_tokens", 0) or 0)
-            text = (resp.choices[0].message.content or "") if getattr(resp, "choices", None) else ""
+            choice = resp.choices[0] if getattr(resp, "choices", None) else None
+            text = (choice.message.content or "") if choice else ""
+            truncated = getattr(choice, "finish_reason", None) == "length"
             try:
                 data = schema.model_validate_json(extract_json_text(text), context=context)
                 return LLMResult(
@@ -134,4 +137,5 @@ class TokenFactoryLLM:
                         "Reply with only the corrected JSON object.",
                     },
                 ]
-        raise LLMOutputError(f"{schema.__name__}: invalid output after 2 attempts ({_short_errors(last)})")
+        hint = f"; output hit the {self.max_tokens}-token limit (raise llm_max_tokens)" if truncated else ""
+        raise LLMOutputError(f"{schema.__name__}: invalid output after 2 attempts ({_short_errors(last)}){hint}")

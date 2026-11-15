@@ -179,14 +179,15 @@ flowchart TD
 4. **Coverage.** The STRONG model labels each aspect covered, thin or conflicting, and cites evidence IDs.
    - Code, not the model, decides whether an aspect has **≥2 independent sources**, meaning two distinct domains.
    - Follow-up queries are generated only for thin or conflicting aspects. They run at advanced depth over tiers 1–3.
-   - A query is skipped if it overlaps an earlier one by ≥0.7 (term Jaccard).
+   - Each follow-up names its aspect. Code allows **at most one follow-up per aspect per round**, and none for an aspect that already has independent sources.
+   - A query is also skipped if it overlaps an earlier one by ≥0.7 (term Jaccard). Every skipped query is logged with its reason.
 5. **Stop rules**, checked in this order. The first that fires is saved to `tasks.stop_reason`:
 
    | Stop reason | When |
    |---|---|
    | `coverage_complete` | every aspect has ≥2 independent sources |
    | `few_new_evidence` | the round added fewer than 2 new kept evidence items |
-   | `max_rounds` | 3 rounds have run |
+   | `max_rounds` | 2 rounds have run (round 1 plus one follow-up round) |
    | `time_budget` / `credit_budget` | the time or credit budget is used up |
    | `no_new_queries` | there are no non-duplicate follow-ups |
    | `coverage_check_failed` | the coverage step failed |
@@ -283,13 +284,13 @@ Both use the standard library only.
   |---|---|
   | Round 1: 5 basic searches | 5 |
   | Round 1: extract 10 URLs | 2 |
-  | Rounds 2–3, each: 5 advanced searches | 10 |
-  | Rounds 2–3, each: extract 10 URLs | 2 |
-  | **Total** | **31** |
+  | Round 2: up to 5 advanced searches (one per thin aspect) | 10 |
+  | Round 2: extract 10 URLs | 2 |
+  | **Total** | **19** |
 
   That is below the 60-credit budget, which also stops the loop. Extract is billed at 1 credit per 5 successful URLs at basic depth.
 - **Cache:** repeat questions within 7 days reuse cached searches and pages at 0 credits.
-- **Latency:** dominated by LLM calls. The defaults are 120 s per LLM request, 30 s per search, 60 s per extract, and a 420 s research budget.
+- **Latency:** dominated by LLM calls. These models write long reasoning before their JSON (5,000–7,000 output tokens per notes call in a live run), so each call is allowed up to 16,384 output tokens (`llm_max_tokens`) and 300 s (the writer took 165 s in a live run). Other defaults: 30 s per search, 60 s per extract, and a 420 s research budget.
 
 ## Example brief (mocked run, redacted trace)
 
@@ -326,11 +327,11 @@ Drugx improved progression-free survival. (confidence: high; phase 3 data)
 
 Stop reason: coverage_complete
 Tavily credits: 5 · tokens: 900 in / 180 out
-Models: strong=deepseek-ai/DeepSeek-V4-Pro, fast=deepseek-ai/DeepSeek-V4-Flash · prompt version: onc-2026.11.1
+Models: strong=deepseek-ai/DeepSeek-V4-Pro-0813, fast=deepseek-ai/DeepSeek-V4.1-Flash-1017 · prompt version: onc-2026.11.2
 
 TRACE
-  [brief   ] Brief written                                   (deepseek-ai/DeepSeek-V4-Pro)
-  [plan    ] Planned 3 queries                               (deepseek-ai/DeepSeek-V4-Pro)
+  [brief   ] Brief written                                   (deepseek-ai/DeepSeek-V4-Pro-0813)
+  [plan    ] Planned 3 queries                               (deepseek-ai/DeepSeek-V4-Pro-0813)
   [approval] Waiting for approval / Approved; research started
   [round   ] Round 1: 3 queries, basic depth, tiers [1, 2]
   [search  ] 2 results for '[query 1]' (basic, tiers [1, 2])  (1 cr)
@@ -338,12 +339,12 @@ TRACE
   [search  ] 2 results for '[query 3]' (basic, tiers [1, 2])  (1 cr)
   [extract ] Extracted 6/6 URLs in one batch                 (2 cr)
   [evidence] Kept 2/2 for '[query 1]'   (x3)
-  [notes   ] 2 notes for '[query 1]'    (x3)                 (deepseek-ai/DeepSeek-V4-Flash)
+  [notes   ] 2 notes for '[query 1]'    (x3)                 (deepseek-ai/DeepSeek-V4.1-Flash-1017)
   [coverage] 2/2 aspects have >= 2 independent sources; 0 follow-up queries
   [stop    ] Research stopped after round 1: coverage_complete
-  [write   ] Drafted 2 items, 0 conflicts (sufficient=True)  (deepseek-ai/DeepSeek-V4-Pro)
+  [write   ] Drafted 2 items, 0 conflicts (sufficient=True)  (deepseek-ai/DeepSeek-V4-Pro-0813)
   [check   ] Claim 1: numeric check passed
-  [verify  ] Claim 1: 1 supported                            (deepseek-ai/DeepSeek-V4-Flash)
+  [verify  ] Claim 1: 1 supported                            (deepseek-ai/DeepSeek-V4.1-Flash-1017)
   [check   ] Claim 2: numeric check passed
   [verify  ] Claim 2: 1 supported
   [done    ] Finished: done
@@ -353,10 +354,10 @@ TRACE
 
 | Tier | Default | Used for |
 |---|---|---|
-| STRONG | `deepseek-ai/DeepSeek-V4-Pro` | brief, planner, coverage check, writer, repair |
-| FAST | `deepseek-ai/DeepSeek-V4-Flash` | worker notes, citation verification |
+| STRONG | `deepseek-ai/DeepSeek-V4-Pro-0813` | brief, planner, coverage check, writer, repair |
+| FAST | `deepseek-ai/DeepSeek-V4.1-Flash-1017` | worker notes, citation verification |
 
-**Confirm the IDs with `scripts/list_models.py` first;** they are configurable in `config.py` or `.env`.
+These IDs were confirmed available on Token Factory with `scripts/list_models.py` on 2026-11-15. Token Factory model IDs carry version suffixes and change over time, so rerun that script if a call fails with "model not found". Both tiers are configurable in `config.py` or `.env` (`RESEARCH_STRONG_MODEL`, `RESEARCH_FAST_MODEL`). Rerun the evals and the drift gate after changing either one.
 
 **Token Factory**
 - **Client:** `AsyncOpenAI(base_url="https://api.tokenfactory.nebius.com/v1")`.

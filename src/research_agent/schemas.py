@@ -192,14 +192,26 @@ class AspectStatus(BaseModel):
         return _ids(v)
 
 
+class FollowUp(BaseModel):
+    aspect: str = ""  # which thin/conflicting aspect this query is for (used for the per-aspect cap)
+    query: str = Field(min_length=1)
+
+
 class Coverage(BaseModel):
     aspects: list[AspectStatus] = Field(min_length=1)
-    follow_up_queries: list[str] = Field(default_factory=list)
+    follow_up_queries: list[FollowUp] = Field(default_factory=list)
 
     @field_validator("follow_up_queries", mode="before")
     @classmethod
-    def _q(cls, v: Any) -> list[str]:
-        return _clean_strings(v or [])
+    def _q(cls, v: Any) -> list[dict]:
+        out, seen = [], set()
+        for item in v or []:
+            d = {"query": item} if isinstance(item, str) else dict(item or {})
+            q = " ".join(str(d.get("query") or "").split())
+            if q and q.lower() not in seen:
+                seen.add(q.lower())
+                out.append({"aspect": " ".join(str(d.get("aspect") or "").split()), "query": q})
+        return out
 
 
 # --- writer --------------------------------------------------------------------
