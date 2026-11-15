@@ -57,6 +57,21 @@ def terms(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9]+", (text or "").lower()) if len(w) > 2 and w not in _STOPWORDS}
 
 
+def normalize_query(query: str) -> str:
+    return " ".join(sorted(terms(query)))
+
+
+def jaccard(a: str, b: str) -> float:
+    ta, tb = terms(a), terms(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def near_duplicate(query: str, previous: list[str], threshold: float = 0.7) -> bool:
+    return any(jaccard(query, p) >= threshold for p in previous)
+
+
 def overlap(query: str, text: str) -> float:
     q = terms(query)
     if not q:

@@ -1,4 +1,4 @@
-"""List models available on Nebius Token Factory and check the configured IDs exist.
+"""List models available on Nebius Token Factory and check the configured STRONG/FAST IDs exist.
 
 Usage: uv run python scripts/list_models.py
 """
@@ -18,11 +18,8 @@ async def main() -> int:
     if not settings.nebius_api_key:
         print("NEBIUS_API_KEY is not set (put it in .env).", file=sys.stderr)
         return 2
-    client = AsyncOpenAI(
-        base_url=settings.nebius_base_url,
-        api_key=settings.nebius_api_key,
-        timeout=settings.network.llm_timeout_s,
-    )
+    client = AsyncOpenAI(base_url=settings.nebius_base_url, api_key=settings.nebius_api_key,
+                         timeout=settings.network.llm_timeout_s)
     try:
         page = await client.models.list()
     except OpenAIError as exc:
@@ -33,17 +30,19 @@ async def main() -> int:
     for mid in ids:
         print(f"  {mid}")
 
-    print("\nConfigured models:")
+    print("\nConfigured tiers:")
     ok = True
-    for role in ("planner", "writer", "verifier"):
-        mid = getattr(settings.models, role)
+    for tier, mid in settings.model_ids().items():
         found = mid in ids
         ok &= found
-        print(f"  {role:9} {mid}  {'OK' if found else 'NOT FOUND'}")
+        print(f"  {tier.upper():6} {mid}  {'OK' if found else 'NOT FOUND'}")
         if not found:
-            close = [i for i in ids if mid.split("/")[-1].split("-")[0].lower() in i.lower()]
+            stem = mid.split("/")[-1].split("-")[0].lower()
+            close = [i for i in ids if stem in i.lower()]
             if close:
-                print(f"            similar: {', '.join(close[:5])}")
+                print(f"         similar: {', '.join(close[:6])}")
+    if not ok:
+        print("\nSet RESEARCH_STRONG_MODEL / RESEARCH_FAST_MODEL in .env, or edit config.py.")
     return 0 if ok else 1
 
 

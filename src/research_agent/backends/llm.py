@@ -9,8 +9,8 @@ from typing import Any, Generic, Protocol, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
-from .config import Network, Settings
-from .retry import with_retry
+from ..config import Network, Settings
+from ..retry import with_retry
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -26,6 +26,7 @@ class LLMResult(Generic[T]):
     output_tokens: int = 0
     latency_ms: int = 0
     attempts: int = 1
+    model: str = ""
 
 
 class LLMClient(Protocol):
@@ -121,7 +122,7 @@ class TokenFactoryLLM:
                 data = schema.model_validate_json(extract_json_text(text), context=context)
                 return LLMResult(
                     data=data, input_tokens=in_tok, output_tokens=out_tok,
-                    latency_ms=int((time.perf_counter() - start) * 1000), attempts=attempt,
+                    latency_ms=int((time.perf_counter() - start) * 1000), attempts=attempt, model=model,
                 )
             except ValidationError as exc:
                 last = exc

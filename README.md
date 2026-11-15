@@ -1,19 +1,49 @@
-# Research Agent
+# Oncology Update Briefs
 
-Turns a question into a **sourced, verifiable answer**. Every claim in the answer cites specific evidence excerpts from live web sources, and a second model checks each claim against each cited excerpt. When the evidence doesn't hold up, the agent says so instead of guessing.
+**What has changed for this clinical question since a given date?** This research agent turns an oncologist's question into a dated update brief they can read in under five minutes and verify in seconds. Every claim cites a source excerpt, every number is shown beside the verbatim sentence it came from, and a verifier model checks each claim against the original text.
 
-- **LLM inference:** [Nebius Token Factory](https://tokenfactory.nebius.com) (OpenAI-compatible API) for planning, writing and verification
-- **Live web search:** [Tavily](https://tavily.com) `search` to find sources, `extract` to pull query-relevant page content
+Built for the Nebius hackathon. It uses [Nebius Token Factory](https://tokenfactory.nebius.com) for all LLM inference and [Tavily](https://tavily.com) `search` + `extract` for live web evidence.
 
-## Who it's for
+> **Clinician-support tool.** This brief summarizes published and public information to support a clinician's professional judgment and independent review. It is not for patients and does not give patient-specific recommendations.
+>
+> **Use limits:**
+> - clinician-facing only
+> - not for patients
+> - not for urgent or time-critical decisions
+> - does not use patient data
+> - summarizes published and public information for independent review
 
-People who need an answer they can check, not just one that sounds right: analysts, journalists, students, and engineers doing due diligence. Each claim in the answer shows:
+## Who it's for and the task
 
-- whether it is a **fact**, an **inference**, or **uncertain**
-- which source excerpts it relies on (with clickable links)
-- whether a verifier found each excerpt **supported**, **partial**, **unsupported**, or **source_unavailable**
+The user is a practicing oncologist. A guideline was last updated, or a major paper came out, on some date, and they need to know what has changed since then for one clinical question. For example: first-line EGFR-mutant metastatic NSCLC since the 2024 ESMO update, or HER2-low metastatic breast cancer since June 2025.
 
-The full trace (queries, sources, dropped items and why, latency, tokens) is stored in SQLite.
+The output is a dated brief:
+
+1. **Bottom line:** one sentence, with confidence (high, moderate or low) and the reason for it.
+2. **What's new since [anchor date]:** one item per development, newest first. Each item shows:
+   - the date and source type
+   - what changed
+   - the evidence level in plain words (e.g. "phase 3 randomized trial")
+   - whether it is peer-reviewed or **PRELIMINARY**, labeled in the item itself
+   - the study population, or "population not stated"
+   - key numbers, each beside its verbatim source sentence
+   - the source links with their verdicts
+3. **Sources disagree:** conflicts, and how the sources differ.
+4. **Not yet established:** aspects with insufficient evidence.
+5. **Check before acting:** e.g. full publication pending, label wording, guideline version.
+6. **The clinician-support statement.**
+
+### Why live web evidence complements PubMed-based tools
+
+PubMed-based tools are strong on indexed, peer-reviewed literature. Many decision-relevant changes in oncology appear on the web first, or never appear in PubMed at all:
+
+- regulatory approvals, label changes and safety communications (FDA, EMA)
+- guideline updates (NCCN, ESMO, ASCO)
+- conference abstracts and trial readouts
+- trial status changes (ClinicalTrials.gov)
+- company announcements
+
+This agent searches those sources first, filtered to on or after the anchor date. It labels anything preliminary as preliminary, so it adds to a PubMed workflow rather than replacing it.
 
 ## Setup
 
@@ -21,192 +51,295 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync
-cp .env.example .env        # then fill in NEBIUS_API_KEY and TAVILY_API_KEY
+cp .env.example .env        # fill in NEBIUS_API_KEY and TAVILY_API_KEY
+uv run python scripts/list_models.py   # confirm the STRONG and FAST model IDs exist
 ```
 
-Confirm the configured model IDs exist on your Token Factory account:
-
-```bash
-uv run python scripts/list_models.py
-```
-
-It lists all available models and marks each configured model `OK` or `NOT FOUND`, with similar IDs suggested. If one is missing, change it in `src/research_agent/config.py` or override it in `.env` (`RESEARCH_PLANNER_MODEL`, `RESEARCH_WRITER_MODEL`, `RESEARCH_VERIFIER_MODEL`).
+`list_models.py` prints every Token Factory model ID and marks the configured STRONG and FAST models `OK` or `NOT FOUND`, with similar IDs suggested. Set `RESEARCH_STRONG_MODEL` and `RESEARCH_FAST_MODEL` in `.env`, or edit `config.py`, before relying on them. **Keys are read only from the environment and are never logged or printed.**
 
 ## Run
 
 ```bash
-uv run research "How did global EV sales change in 2025, and which markets drove it?"
-```
+# CLI: shows the brief and planned queries, asks to start (or pass --yes)
+uv run research "What has changed for first-line EGFR-mutant metastatic NSCLC since 2024-06-01?"
+uv run research "..." --yes --export ris --out sources.ris
+uv run research --run 12                      # approve a prepared task later
+uv run research --show 12                     # reprint a stored brief
 
-The CLI prints live progress on stderr, then the answer, citations with verdicts, and the trace. Options:
-
-- `--show TASK_ID` reprints a stored run
-- `--no-trace` omits the trace
-- `--quiet` hides live progress
-- `--db PATH` uses another SQLite file
-
-Exit code: 0 = done, 3 = insufficient evidence, 1 = failed.
-
-Web UI:
-
-```bash
+# Web UI
 uv run streamlit run app/streamlit_app.py
 ```
 
-It has a question box, live step-by-step progress, claims with verdict badges, clickable sources, an expandable trace (steps, sub-queries, evidence including dropped items) and recent runs in the sidebar.
+**CLI exit codes:**
 
-Tests:
+| Code | Meaning |
+|---|---|
+| 0 | done |
+| 1 | failed |
+| 2 | missing keys |
+| 3 | insufficient evidence |
+| 4 | needs clarification |
+| 5 | not approved |
+| 6 | identifiers detected |
+
+**UI:**
+- a question box with the no-identifiers notice
+- the brief and planned queries, with a **Start research** button
+- live progress: the run happens in a background thread and the page polls SQLite, so a refresh doesn't interrupt it
+- the brief with verdict, claim-type, tier and PRELIMINARY badges
+- numbers beside their source sentences
+- clickable sources, CSV and RIS downloads, credit and token totals
+- an expandable trace showing the model ID and prompt version for every step
+
+**Tests and evals:**
 
 ```bash
-uv run pytest            # mocked unit tests, no network
-uv run pytest -m live -s # optional live smoke test (skipped without keys)
+uv run pytest                    # mocked unit tests, no network
+uv run pytest -m live -s         # optional live smoke test (skipped without keys)
+uv run python evals/run_evals.py # 15 questions, live
+uv run python evals/compare.py   # drift gate against evals/baseline.json
 ```
 
-## How it works
+## Architecture
 
-```
-question
-   │
-   ▼
-1. PLAN ─────────── planner model → 3–5 independent sub-queries (JSON, Pydantic-validated)
-   │
-   ▼
-2. RESEARCH ─────── per sub-query, concurrently (asyncio.gather + semaphore):
-   │                Tavily search (≤5 results) → Tavily extract (query-relevant chunks)
-   │                failures recorded; extraction failure falls back to search snippets
-   ▼
-3. EVIDENCE ─────── normalize URL, pick best excerpt, score relevance,
-   │                dedupe by URL and content hash; dropped items kept with drop_reason
-   ▼
-4. FOLLOW-UP ────── sub-queries with < 2 kept items get rewritten queries; one round max, then stop
-   │
-   ▼
-5. WRITE ────────── writer model → claims tagged fact / inference / uncertain, each citing evidence IDs.
-   │                Web text is inside <untrusted_source> blocks, marked as data, never instructions.
-   │                No usable evidence → insufficient_evidence, no answer is invented.
-   ▼
-6. VERIFY ───────── verifier model, one call per claim → a verdict for every claim–citation pair
-                    (supported | partial | unsupported | source_unavailable)
+```mermaid
+flowchart TD
+    Q[Question] --> P{Identifier check}
+    P -- identifiers --> X[Blocked, nothing stored]
+    P --> B["1. Brief (STRONG)<br/>cancer type, setting, question, anchor date"]
+    B -- too vague --> C[Clarifying question]
+    B --> PL["2. Plan (STRONG)<br/>3-5 broad queries"]
+    PL --> A[3. Approval<br/>UI button / CLI prompt or --yes]
+    A --> R["4. Research workers (parallel)<br/>Tavily search: tiers, start_date, cache<br/>snippet scoring, batched extract, cache<br/>FAST notes with verified numbers/design/population"]
+    R --> CV["5. Coverage (STRONG)<br/>aspects: covered / thin / conflict<br/>independence = distinct domains, in code"]
+    CV -- thin or conflict, no stop rule --> R
+    CV -- stop rule --> W["6. Write (STRONG)<br/>from notes only"]
+    W --> V["7. Verify<br/>number check in code, then FAST verifier vs original excerpt"]
+    V --> RP["8. Repair once (STRONG)<br/>re-verify revised claims only"]
+    RP --> F[Finalize: tier-3-only -> uncertain,<br/>confidence caps, status]
+    F --> OUT[Update brief + trace in SQLite]
 ```
 
-The task's status moves `planning → researching → writing → verifying → done`. It ends as `insufficient_evidence` when:
+- **Engine** (`src/research_agent/engine/`): plain async functions, one per step (`brief`, `planner`, `research`, `coverage`, `writer`, `verifier`), plus `checks` (the deterministic guards) and the `orchestrator`. The orchestrator exposes `prepare()` (brief and plan, then it stops for approval), `run()` (everything after approval) and `run_all()`. There is no UI code in the engine, so a FastAPI wrapper could call these functions as they are.
+- **Backends** (`backends/`): `llm.py` wraps Token Factory through `AsyncOpenAI`. `tavily.py` implements the `SearchBackend` protocol in `search_base.py`. `cache.py` checks before every Tavily call. To add another source, implement `search()` and `extract()`; the engine doesn't change.
+- **Storage** (`storage.py`): SQLite, written after every step. A crash leaves a full trace, and the UI polls it for progress.
+- **Everything else:** `prompts.py` (all prompts and `PROMPT_VERSION`), `sources.py` (tiers and source types), `privacy.py`, `exports.py`, `metrics.py`, `render.py`.
 
-- no usable evidence is found, or
-- the writer reports the evidence is insufficient, or
-- no claim is supported, even partially, by its cited excerpt.
+### How it decides what to search, and when to stop
 
-It ends as `failed` (with `error` set) only when a step that the run cannot continue without (planning or writing) fails.
+1. **Brief.** The STRONG model extracts cancer type, setting (stage, line, biomarker), the question, the anchor date, and 2–6 aspects a complete answer must cover.
+   - With no anchor date, it defaults to 12 months ago and says so in the brief.
+   - If cancer type or setting is too vague to search well, it returns a clarifying question instead of searching.
+2. **Plan.** 3–5 independent, fairly broad queries.
+3. **Round 1** searches **tiers 1–2 only**, at basic depth, with up to 10 results per query and `start_date` set to the anchor date.
+   - Each worker scores its hits on the **snippets** (Tavily score blended with term overlap) and sends only its top 2 URLs to extraction.
+   - The round's URLs are extracted together, at most 20 per call, after checking the cache.
+4. **Coverage.** The STRONG model labels each aspect covered, thin or conflicting, and cites evidence IDs.
+   - Code, not the model, decides whether an aspect has **≥2 independent sources**, meaning two distinct domains.
+   - Follow-up queries are generated only for thin or conflicting aspects. They run at advanced depth over tiers 1–3.
+   - A query is skipped if it overlaps an earlier one by ≥0.7 (term Jaccard).
+5. **Stop rules**, checked in this order. The first that fires is saved to `tasks.stop_reason`:
 
-### Reliability rules
+   | Stop reason | When |
+   |---|---|
+   | `coverage_complete` | every aspect has ≥2 independent sources |
+   | `few_new_evidence` | the round added fewer than 2 new kept evidence items |
+   | `max_rounds` | 3 rounds have run |
+   | `time_budget` / `credit_budget` | the time or credit budget is used up |
+   | `no_new_queries` | there are no non-duplicate follow-ups |
+   | `coverage_check_failed` | the coverage step failed |
 
-- **Hard limits** live in `config.py`: max 5 sub-queries, max 1 follow-up round, max 5 results per search, per-request timeouts, and capped evidence sent to the writer.
-- **Retries:** every network call goes through `retry.with_retry`, which uses exponential backoff with jitter for transient errors (timeouts, connection errors, 429, 5xx). Non-transient errors such as auth failures fail immediately.
-- **Failed searches don't stop the run.** A failed search or extraction is recorded in `trace_events` and on the sub-query, and the run continues.
-- **No silent unsupported output:**
-  - A citation to evidence that was dropped or never shown to the writer is marked `source_unavailable`.
-  - A citation to a nonexistent ID is removed, and a fact left with no valid citation is downgraded to `uncertain`.
-  - A citation the verifier skipped, or one whose verification call failed, is marked `unsupported` with a note saying why.
-- **Malformed LLM output:** if output fails Pydantic validation, the model gets one repair attempt with the validation errors. If a model rejects JSON mode, the wrapper falls back to prompt-only JSON.
-- **Prompt-injection guard:** any `<untrusted_source>` tags inside retrieved text are removed before wrapping, so a page can't close its block and inject instructions.
-- **Crash-safe trace:** SQLite is written after every step (WAL mode), so a crash leaves a full trace.
+### Source tiers and how trust is shown
 
-### Code layout
-
-```
-src/research_agent/
-  config.py       models, limits, timeouts, retry policy; stdlib .env loader
-  schemas.py      Pydantic models for every LLM output
-  llm.py          Token Factory wrapper (AsyncOpenAI): JSON mode, validation + repair, usage
-  retry.py        backoff + transient-error classification
-  search/base.py  SearchBackend protocol, the only thing the engine knows about search
-  search/tavily.py Tavily implementation (AsyncTavilyClient search + extract)
-  evidence.py     pure functions: URL normalization, hashing, excerpt choice, scoring, dedupe
-  prompts.py      planner / writer / verifier prompts, untrusted-data wrapping
-  planner.py, researcher.py, writer.py, verifier.py   one module per pipeline step
-  context.py      per-run context: DB handle, clients, trace + event emission
-  pipeline.py     run_research(): orchestration, plain async, no UI code
-  storage.py      SQLite schema and queries (stdlib sqlite3)
-  render.py       text rendering for CLI / stored final answer
-  cli.py          `research` entry point
-app/streamlit_app.py   UI only; calls run_research with an on_event callback
-scripts/list_models.py lists Token Factory models and checks configured IDs
-```
-
-The engine is plain async Python. `run_research(question, llm=..., search=..., conn=..., settings=..., on_event=...)` takes its dependencies as arguments, so a FastAPI endpoint can call it unchanged. To add another search source, implement `SearchBackend` (`search`, `extract`) and pass it in; the planner and the other steps don't change.
-
-### Storage
-
-There are seven tables:
-
-| Table | Holds |
-|---|---|
-| `tasks` | the question, status, final answer, error |
-| `sub_queries` | each query with its round and status (`done`, `weak`, `empty`, `failed`) |
-| `sources` | unique by normalized URL, with content hash |
-| `evidence` | excerpt, relevance score, `kept`, `drop_reason` |
-| `claims` | claim text and claim type |
-| `claim_citations` | a verdict and verifier note per claim–evidence pair |
-| `trace_events` | step, detail JSON, latency, input/output tokens |
-
-Inspect a run with any SQLite client, or `uv run research --show <id>`.
-
-## Models and integrations
-
-| Role | Default model | Why |
+| Tier | Domains | Use |
 |---|---|---|
-| Planner | `deepseek-ai/DeepSeek-V4-Flash` | fast, cheap, good at structured JSON |
-| Writer | `NousResearch/Hermes-4-405B` | strong long-context synthesis over many excerpts |
-| Verifier | `deepseek-ai/DeepSeek-V4-Flash` | many small checks, run concurrently |
+| 1: regulatory, registries, guidelines | fda.gov, ema.europa.eu, clinicaltrials.gov, cancer.gov, nccn.org, esmo.org, asco.org, ncbi.nlm.nih.gov, pubmed.ncbi.nlm.nih.gov | all rounds |
+| 2: journals | nejm.org, thelancet.com, jamanetwork.com, ascopubs.org, annalsofoncology.org, aacrjournals.org, nature.com | all rounds |
+| 3: oncology news, press releases | ascopost.com, onclive.com, targetedonc.com, cancernetwork.com, prnewswire.com, businesswire.com, globenewswire.com | follow-up rounds only, as leads; **always labeled lower trust** |
 
-- **Token Factory:** reached with the `openai` SDK (`AsyncOpenAI(base_url="https://api.tokenfactory.nebius.com/v1")`). The SDK's own retries are disabled so `retry.py` is the single retry policy. Token usage per call is recorded in `trace_events`.
-- **Tavily:**
-  - `search` uses `search_depth="advanced"` and `max_results=5`.
-  - `extract` is called once per sub-query with the sub-query as `query` and `chunks_per_source=3`, so it returns the chunks of each page most relevant to that sub-query. The agent then picks one bounded excerpt (≤1500 chars) per page and that excerpt is what gets cited and verified.
+- **Filtering:** domains are restricted with Tavily `include_domains`, and dates with `start_date` (publish date). Any result outside the allowlist is recorded as `off_allowlist` and not used.
+- **Tier 3:** a claim whose only supporting sources are tier 3 is retagged **uncertain**.
+- **Press releases:** company newsroom domains can't be put on an allowlist, so they are only found through the three wire services listed.
+- **Source types:** `regulatory_action`, `guideline`, `registry_entry`, `peer_reviewed_article`, `conference_abstract`, `preprint`, `press_release`, `news`. Deterministic URL rules run first (e.g. `fda.gov` is a regulatory action, `_suppl` DOIs and `meetings.asco.org` are conference abstracts, journal domains are peer-reviewed articles). The FAST worker classifies only what the rules leave ambiguous, and anything left over falls back to the conservative `news`.
+- **Preliminary evidence:** conference abstracts, preprints and press releases are **PRELIMINARY**. The label is added by code inside each item, not left to the model or a legend.
+- **Peer review:** `peer_reviewed` is true only when a supporting source is a peer-reviewed article.
+- **Login walls:** some guideline pages need a login. When extraction fails, the evidence is stored with `drop_reason = source_unavailable: …`, any citation to it gets the verdict `source_unavailable`, and the run continues.
+- **Confidence caps:** the bottom line is capped at **low** when no finding is supported by a tier 1–2, non-preliminary source. It is capped at **moderate** when items are flagged or sources disagree.
 
-Keys are read only from `NEBIUS_API_KEY` and `TAVILY_API_KEY` (environment or `.env`). They are never logged, printed, or included in `repr(Settings)`.
+### How evidence is deduplicated and checked
 
-## Sample research trace
+- **Dedupe.** URLs are normalized (lowercase host, no `www.`, no fragment, no tracking parameters, sorted query). Evidence is deduped by normalized URL and by a content hash, within and across rounds. Dropped items are kept with a reason:
+  - `duplicate_url`, `duplicate_content`
+  - `low_relevance`, `not_selected_for_extraction`
+  - `off_allowlist`, `source_unavailable`
+- **Untrusted data.** Retrieved text and notes derived from it always sit inside `<untrusted_source>` or `<untrusted_note>` blocks. Any such tags inside page text are removed first, and every prompt containing them says never to follow instructions found there. The agent only reads the web and takes no actions based on page content.
+- **Worker notes (FAST)** are checked against the excerpts in code:
+  - Each number must come with a sentence that appears verbatim in the excerpt and contains that number.
+  - A design phrase (e.g. "phase 3 randomized") must appear in the excerpt.
+  - A population needs a verbatim population sentence that states it.
+  - Anything that fails is dropped and logged.
+- **The writer** sees notes and trusted metadata only, never raw page text.
+- **Numbers.** Before the LLM verifier runs, code checks that every number in a claim (HR, %, months, p-values, doses, dates) appears in that claim's stored verbatim source sentence, and that the sentence appears in the cited excerpt. A failure marks the citation **unsupported** without calling the LLM and sends the claim to repair. Numbers inside names such as HER2, CDK4/6, PD-1, G12C or "phase 3" are not checked as results.
+- **Evidence level** may only name phase or design words stated in a cited excerpt; otherwise it is "not stated".
+- **Population** must come from a verified note for a cited source; otherwise it is "population not stated". It is never inferred.
+- **Verifier (FAST).** Each claim–citation pair is checked against the original excerpt and gets `supported`, `partial`, `unsupported` or `source_unavailable`.
+- **Repair (once).** Unsupported or partial claims go back to the STRONG writer with the verifier's note. The writer may revise the claim, cite other evidence, or mark it uncertain. Only revised claims are re-verified. Anything still unsupported is shown **FLAGGED: not verified** and never as verified. If nothing is supported, the task ends `insufficient_evidence`.
 
-> Mocked run, shown to illustrate the format. Replace with a live run: `uv run research "<question>"`.
+## Safety and governance
+
+| Concern | What addresses it |
+|---|---|
+| **Hallucination detection** | Number checks in code against verbatim source sentences; per-citation LLM verification against the original excerpt; one repair pass; unverified claims shown as FLAGGED; `insufficient_evidence` when nothing holds up; writer limited to verified notes. |
+| **Explainability** | Every claim cites evidence IDs with links; numbers are shown beside their source sentences; claim type, evidence level, peer-review or PRELIMINARY label, tier and verifier note appear on each item; the stop reason is shown. |
+| **Clinical safety** | Clinician-facing statement and use limits in the UI, CLI and README; no patient-specific recommendations; not for urgent decisions; tier-3-only claims tagged uncertain; confidence caps; a "check before acting" section; preliminary evidence labeled in the item. |
+| **Privacy** | No patient data is used. An input check blocks MRN-like numbers, dates of birth and names with "patient", Mr or Mrs before anything is stored. Keys come only from the environment and are never logged. |
+| **Auditability** | SQLite trace written after every step: sub-queries, every evidence item including dropped ones and why, notes, claims, verdicts, latency, tokens and Tavily credits. Model ID and prompt version are on every task and trace event. CSV and RIS exports. |
+| **Drift** | `PROMPT_VERSION` is recorded on every task and event. `evals/compare.py` fails if citation support rate or number-check pass rate drops by more than 3 points against the baseline. **Rerun evals and the drift gate before changing any model or prompt.** |
+| **Evidence-population bias** | The population is shown per item when a source states it (age range, region, key exclusions), and is never inferred; otherwise "population not stated", so clinicians can judge applicability to their patients. |
+
+**Why the design follows FDA's non-device CDS principles.** The FDA's criteria for clinical decision support software that is not a medical device (21st Century Cures Act §520(o)(1)(E), FDA CDS guidance, 2022) include:
+
+- **No image or signal analysis.** The tool does not acquire, process or analyze medical images or signals.
+- **Published information only.** It displays and summarizes medical information such as guidelines, regulatory documents and studies, not patient data.
+- **Clinician-facing.** It supports a healthcare professional, not patients or caregivers, and is not intended for time-critical decisions.
+- **Transparent, independently reviewable basis.** Every claim links to its source, numbers sit beside their verbatim sentences, and verification verdicts are shown, so the clinician need not rely mainly on the tool.
+
+**This is a design rationale, not a regulatory determination.** Whether a specific deployment is a device depends on its intended use and labeling, and needs a regulatory review.
+
+## Exports
+
+From the UI download buttons or `--export csv|ris`, the sources used in a brief export as:
+- **CSV:** evidence IDs, title, URL, domain, source type, date, trust tier, verdicts.
+- **RIS** for Zotero or EndNote: `TY` by source type (JOUR, ABST, GOVDOC, PRESS…), `TI`, `UR`, `PY` and `DA`, `DB`, `KW` with source type and tier, and `N1` with type, tier and evidence IDs.
+
+Both use the standard library only.
+
+## Evals and drift gate
+
+- **Questions:** `evals/questions.jsonl` holds 15 oncology "what's changed" questions across 12 cancer types. Three use fictional investigational codes and should end in insufficient evidence. Each has `clinician_rating` and `clinician_notes` fields, left `null` for later expert review.
+- **Running:** `evals/run_evals.py` runs them live with a fresh database (so the cache doesn't hide credit costs). It saves `evals/results/<stamp>.json` with the model IDs, the prompt version and these pooled metrics:
+
+| Metric | Definition |
+|---|---|
+| citation support rate | supported citations / checked citations |
+| numeric check pass rate | first-pass number checks passed / numeric claims |
+| tier 1–2 support share | supported claims backed by a tier 1–2 source / supported claims |
+| preliminary labeled share | claims citing preliminary evidence that carry the PRELIMINARY label |
+| insufficient-evidence accuracy | runs that ended `insufficient_evidence` exactly when expected |
+| cost and speed | average credits, latency and tokens per question |
+
+- **Drift gate:** `evals/compare.py` compares the newest result with `evals/baseline.json` and exits 1 if a gated metric drops by more than 3 points or is missing. `--set-baseline` saves the latest run as the new baseline.
+
+## Credit and latency numbers
+
+**Live numbers have not been measured yet.** Run `evals/run_evals.py` and paste the summary here. What is known now:
+
+- **Mocked happy path:** 3 basic searches (3 credits) plus one extract batch of 6 URLs (2 credits) = **5 credits**, one round, stop reason `coverage_complete`.
+- **Worst case under the defaults:**
+
+  | Item | Credits |
+  |---|---|
+  | Round 1: 5 basic searches | 5 |
+  | Round 1: extract 10 URLs | 2 |
+  | Rounds 2–3, each: 5 advanced searches | 10 |
+  | Rounds 2–3, each: extract 10 URLs | 2 |
+  | **Total** | **31** |
+
+  That is below the 60-credit budget, which also stops the loop. Extract is billed at 1 credit per 5 successful URLs at basic depth.
+- **Cache:** repeat questions within 7 days reuse cached searches and pages at 0 credits.
+- **Latency:** dominated by LLM calls. The defaults are 120 s per LLM request, 30 s per search, 60 s per extract, and a 420 s research budget.
+
+## Example brief (mocked run, redacted trace)
+
+> Produced by the mocked test fixtures, with a fictional drug ("drugx"), to show the format. Replace it with a live run before relying on any content.
 
 ```
-Question: What are the topic facts?
+Question: What has changed for first-line EGFR-mutant metastatic NSCLC since January 2025?
 Status:   done
 
-ANSWER
-------
-1. [fact] Claim from E1  (E1: supported)
-2. [fact] Claim from E2  (E2: supported)
-3. [fact] Claim from E3  (E3: supported)
+BRIEF
+Cancer type: non-small cell lung cancer
+Setting: metastatic, first line, EGFR mutation
+Since: 2025-01-01
+Aspects: regulatory approvals; phase 3 trial results
 
-CITATIONS
----------
-Claim 1 [fact] -> supported
-  E1 supported          https://alpha0.example.com/page
-      stated
-...
+1. BOTTOM LINE
+Drugx improved progression-free survival. (confidence: high; phase 3 data)
+
+2. WHAT'S NEW SINCE 2025-01-01 (newest first)
+1. 2025-06-01 · Regulatory action · Tier 1
+   What changed: Progression-free survival was 23.7 months versus 16.6 months with drugx (HR 0.70).  [fact; supported]
+   Evidence level: phase 3 randomized trial · Not peer reviewed (regulatory action)
+   Population: adults aged 18 years or older in North America and Asia
+   Key numbers (source sentences):
+     E1: "Median progression-free survival was 23.7 months versus 16.6 months (HR 0.70; p<0.001)."
+   Source E1: https://fda.gov/[redacted] (supported)
+2. 2025-06-01 · Peer-reviewed article · Tier 2
+   ... same finding, Peer-reviewed, Source E2: https://nejm.org/[redacted] (supported)
+
+3. SOURCES DISAGREE      No conflicts found.
+4. NOT YET ESTABLISHED   - overall survival benefit
+5. CHECK BEFORE ACTING   - confirm label wording on fda.gov
+6. Clinician-support tool. ... Use limits: ...
+
+Stop reason: coverage_complete
+Tavily credits: 5 · tokens: 900 in / 180 out
+Models: strong=deepseek-ai/DeepSeek-V4-Pro, fast=deepseek-ai/DeepSeek-V4-Flash · prompt version: onc-2026.11.1
 
 TRACE
------
-  [start    ] Task 1: What are the topic facts?
-  [plan     ] Planned 3 sub-queries  (5ms, 100->20 tok)
-  [search   ] 2 results for 'alpha topic facts'  (0ms)
-  [extract  ] Extracted 2/2 pages for 'alpha topic facts'  (0ms)
-  [search   ] 2 results for 'beta topic facts'  (0ms)
-  [extract  ] Extracted 2/2 pages for 'beta topic facts'  (0ms)
-  [search   ] 0 results for 'gamma topic facts'  (0ms)
-  [evidence ] Kept 2/2 evidence items for 'alpha topic facts'
-  [evidence ] Kept 2/2 evidence items for 'beta topic facts'
-  [follow_up] Round 2: 1 follow-up queries for 1 weak sub-queries  (5ms, 100->20 tok)
-  [search   ] 2 results for 'gamma topic facts alternative'  (0ms)
-  [extract  ] Extracted 2/2 pages for 'gamma topic facts alternative'  (0ms)
-  [evidence ] Kept 2/2 evidence items for 'gamma topic facts alternative'
-  [write    ] Drafted 3 claims (sufficient=True)  (5ms, 100->20 tok)
-  [verify   ] Claim 1: 1 supported  (5ms, 100->20 tok)
-  [verify   ] Claim 2: 1 supported  (5ms, 100->20 tok)
-  [verify   ] Claim 3: 1 supported  (5ms, 100->20 tok)
-  [done     ] Finished: done
-  totals: 4 sub-queries, 6/6 evidence kept, 600 input / 120 output tokens
+  [brief   ] Brief written                                   (deepseek-ai/DeepSeek-V4-Pro)
+  [plan    ] Planned 3 queries                               (deepseek-ai/DeepSeek-V4-Pro)
+  [approval] Waiting for approval / Approved; research started
+  [round   ] Round 1: 3 queries, basic depth, tiers [1, 2]
+  [search  ] 2 results for '[query 1]' (basic, tiers [1, 2])  (1 cr)
+  [search  ] 2 results for '[query 2]' (basic, tiers [1, 2])  (1 cr)
+  [search  ] 2 results for '[query 3]' (basic, tiers [1, 2])  (1 cr)
+  [extract ] Extracted 6/6 URLs in one batch                 (2 cr)
+  [evidence] Kept 2/2 for '[query 1]'   (x3)
+  [notes   ] 2 notes for '[query 1]'    (x3)                 (deepseek-ai/DeepSeek-V4-Flash)
+  [coverage] 2/2 aspects have >= 2 independent sources; 0 follow-up queries
+  [stop    ] Research stopped after round 1: coverage_complete
+  [write   ] Drafted 2 items, 0 conflicts (sufficient=True)  (deepseek-ai/DeepSeek-V4-Pro)
+  [check   ] Claim 1: numeric check passed
+  [verify  ] Claim 1: 1 supported                            (deepseek-ai/DeepSeek-V4-Flash)
+  [check   ] Claim 2: numeric check passed
+  [verify  ] Claim 2: 1 supported
+  [done    ] Finished: done
 ```
 
-In this run the `gamma` sub-query found nothing, so one follow-up round rewrote it, found sources, and then stopped.
+## Models and integration setup
+
+| Tier | Default | Used for |
+|---|---|---|
+| STRONG | `deepseek-ai/DeepSeek-V4-Pro` | brief, planner, coverage check, writer, repair |
+| FAST | `deepseek-ai/DeepSeek-V4-Flash` | worker notes, citation verification |
+
+**Confirm the IDs with `scripts/list_models.py` first;** they are configurable in `config.py` or `.env`.
+
+**Token Factory**
+- **Client:** `AsyncOpenAI(base_url="https://api.tokenfactory.nebius.com/v1")`.
+- **JSON output:** JSON mode, with a prompt-only fallback for models that reject `response_format`.
+- **Validation:** every output is validated with Pydantic. On failure the model gets one retry with the error, then a safe fallback:
+
+  | Step | Fallback |
+  |---|---|
+  | Brief | the question itself |
+  | Plan | the question as the only query |
+  | Notes | that worker is skipped |
+  | Coverage | stop with `coverage_check_failed` |
+  | Writer | `failed` |
+  | Verifier | `unsupported`, with a note |
+- **Retries:** the SDK's own retries are off. `retry.py` applies exponential backoff with jitter to transient errors (timeouts, connection errors, 429, 5xx) for both services.
+
+**Tavily (`search` and `extract` only; the `/research` endpoint is never used)**
+- **Search:** `include_domains` by tier, `start_date` set to the anchor date, `include_usage` for exact credits, basic depth in round 1 and advanced in follow-ups.
+- **Extract:** batched up to 20 URLs per call, with `query` and `chunks_per_source=3` so it returns the most relevant chunks.
+- **Credits:** recorded in `trace_events.tavily_credits` for every call and totaled per task.
+
+**Storage:** the specified schema plus:
+- oncology columns: `cancer_type`, `setting`, `anchor_date`, `trust_tier`, `source_type`, `evidence_date`, `evidence_level`, `peer_reviewed`
+- governance columns: `model_ids`, `prompt_version`, `model_id`
+- answer structure: `answer_json`, `section`, `population`, `item_date`, `notes.details`, `claim_citations.source_sentence`
+- two cache tables: `search_cache` and `extract_cache`
+
+`research.db` is versioned (`PRAGMA user_version = 2`). An older database is refused with a clear message rather than silently migrated.

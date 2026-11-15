@@ -29,6 +29,8 @@ def test_missing_keys():
 
 def test_limits_defaults():
     s = Settings()
-    assert s.limits.max_sub_queries == 5
-    assert s.limits.max_follow_up_rounds == 1
-    assert s.limits.max_results_per_search == 5
+    assert s.limits.max_queries_per_round == 5
+    assert s.limits.max_rounds == 3 and s.limits.max_repair_passes == 1
+    assert s.limits.search_results == 10 and s.limits.extract_batch_size == 20
+    assert s.limits.round1_tiers == (1, 2) and 3 in s.limits.follow_up_tiers
+    assert s.budget.credits > 0 and s.budget.time_s > 0 and s.cache_ttl_days == 7
