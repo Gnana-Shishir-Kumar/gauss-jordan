@@ -1,7 +1,7 @@
 [project]
 name = "research-agent"
 version = "0.1.0"
-description = "Turns a question into a sourced, verified answer using Nebius Token Factory and Tavily."
+description = "Dated oncology update briefs from live web evidence (Nebius Token Factory + Tavily), every claim cited and verified."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
