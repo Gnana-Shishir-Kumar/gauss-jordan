@@ -22,7 +22,7 @@ from ..evidence import Candidate, assess, domain_of, normalize_url, relevance
 from ..retry import with_retry
 from ..schemas import WorkerNotes, parse_partial_date
 from ..sources import classify, domains_for, tier_of
-from .checks import contains, numbers_in, population_supported
+from .checks import contains, is_sentence, numbers_in, population_supported
 from .context import RunContext, describe_error
 
 
@@ -138,10 +138,10 @@ async def _search(ctx: RunContext, brief: dict, sq_id: int, query: str, depth: s
 
 
 async def _extract(ctx: RunContext, brief: dict, picks: list[Pick]) -> tuple[dict[str, str], dict[str, str]]:
-    """Cache first, then batched Tavily extract calls (<= batch size URLs each). Keyed by normalized URL."""
+    """Cache first, then batched Tavily extract calls (<= batch size URLs each). Keyed by normalized URL + query."""
     lim, net = ctx.settings.limits, ctx.settings.network
     urls = [p.url for p in picks]
-    pages = cache.get_pages(ctx.conn, urls, ctx.settings.cache_ttl_days)
+    pages = cache.get_pages(ctx.conn, urls, brief.get("question"), ctx.settings.cache_ttl_days)
     failed: dict[str, str] = {}
     if pages:
         await ctx.emit("extract", f"Cache hit: {len(pages)} extracted pages reused", credits=0.0,
@@ -169,7 +169,7 @@ async def _extract(ctx: RunContext, brief: dict, picks: list[Pick]) -> tuple[dic
         bad = {by_raw.get(u, normalize_url(u)): e for u, e in res.failed.items()}
         pages.update(got)
         failed.update(bad)
-        cache.put_pages(ctx.conn, got)
+        cache.put_pages(ctx.conn, got, brief.get("question"))
         await ctx.emit("extract", f"Extracted {len(got)}/{len(batch)} URLs in one batch",
                        level="info" if not bad else "warning", credits=res.credits, latency_ms=_ms(t0),
                        detail={"urls": len(batch), "failed": bad})
@@ -213,7 +213,8 @@ async def _take_notes(ctx: RunContext, brief: dict, sq_id: int, query: str, rows
         excerpts = [by_id[i]["excerpt"] for i in ids]
         numbers = []
         for n in note.numbers:
-            if any(contains(x, n.sentence) for x in excerpts) and numbers_in(n.value) <= numbers_in(n.sentence):
+            if (is_sentence(n.sentence) and any(contains(x, n.sentence) for x in excerpts)
+                    and numbers_in(n.value) <= numbers_in(n.sentence)):
                 numbers.append(n.model_dump())
             else:
                 dropped["unverified_number"] += 1

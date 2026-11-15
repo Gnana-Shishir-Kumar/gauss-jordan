@@ -163,6 +163,11 @@ def h_repair(call):
     return {"claims": [{**good_item(notes[0]), "claim_id": i, "text": GOOD_TEXT + " (revised)"} for i in ids]}
 
 
+def h_bottom_line(call):
+    return {"text": "Drugx improved progression-free survival to 23.7 months.", "confidence": "high",
+            "reason": "rewritten from verified items"}
+
+
 def h_verify(call):
     return {"verdicts": [{"evidence_id": eid, "verdict": "supported", "note": "stated"} for eid, _ in blocks(call.user)]}
 
@@ -172,7 +177,8 @@ class FakeLLM:
         self.conn = conn
         self.handlers: dict[str, Callable] = {
             "Brief": h_brief, "Plan": h_plan, "WorkerNotes": h_notes, "Coverage": h_coverage_complete,
-            "Draft": h_draft, "Repair": h_repair, "ClaimVerification": h_verify, **overrides,
+            "Draft": h_draft, "Repair": h_repair, "ClaimVerification": h_verify, "BottomLine": h_bottom_line,
+            **overrides,
         }
         self.calls: list[SimpleNamespace] = []
 

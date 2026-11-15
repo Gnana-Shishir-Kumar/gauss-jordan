@@ -17,7 +17,7 @@ import streamlit as st
 from research_agent import storage
 from research_agent.config import Settings, get_settings
 from research_agent.engine import prepare, run
-from research_agent.engine.checks import number_tokens, numbers_in
+from research_agent.engine.checks import before_anchor, number_tokens, numbers_in
 from research_agent.engine.orchestrator import default_clients, load_report
 from research_agent.exports import sources_used, to_csv, to_ris
 from research_agent.privacy import IdentifierError, find_identifiers
@@ -105,7 +105,7 @@ def live_progress(task_id: int) -> None:
         show_progress_log(report)
 
 
-def item_card(c: dict) -> None:
+def item_card(c: dict, anchor: str | None = None) -> None:
     v = claim_verdict(c)
     color, icon = VERDICT.get(v, ("gray", ""))
     cits = c["citations"]
@@ -117,6 +117,8 @@ def item_card(c: dict) -> None:
         badges.append(":orange-badge[:material/science: PRELIMINARY]")
     if is_flagged(c):
         badges.append(":red-badge[FLAGGED: not verified]")
+    if before_anchor(c.get("item_date"), anchor):
+        badges.append(f":red-badge[DATED BEFORE {anchor}: not new]")
     with st.container(border=True):
         st.markdown(" ".join(badges))
         st.markdown(f"**{c.get('item_date') or 'date not stated'} · {', '.join(types)}**  \n{md(c['text'])}")
@@ -180,11 +182,11 @@ def show_report(report: dict) -> None:
     if not new:
         st.markdown("No verified developments found.")
     for c in new:
-        item_card(c)
+        item_card(c, t.get("anchor_date"))
     st.markdown("#### 3. Sources disagree")
     conflicts = [c for c in claims if c["section"] == "conflict"]
     for c in conflicts:
-        item_card(c)
+        item_card(c, t.get("anchor_date"))
     if not conflicts:
         st.markdown("No conflicts found.")
     st.markdown("#### 4. Not yet established")

@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # The specified schema, plus: oncology columns (tasks.cancer_type/setting/anchor_date, sources.trust_tier/source_type,
 # evidence.evidence_date, claims.evidence_level/peer_reviewed), governance columns (model_ids, prompt_version),
@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS claim_citations (claim_id INTEGER REFERENCES claims(i
 CREATE TABLE IF NOT EXISTS trace_events (id INTEGER PRIMARY KEY, task_id INTEGER REFERENCES tasks(id), step TEXT NOT NULL, detail TEXT, latency_ms INTEGER, input_tokens INTEGER, output_tokens INTEGER, tavily_credits REAL, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   model_id TEXT, prompt_version TEXT);
 CREATE TABLE IF NOT EXISTS search_cache (key TEXT PRIMARY KEY, query TEXT, params TEXT, results TEXT NOT NULL, fetched_at TEXT DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS extract_cache (url TEXT PRIMARY KEY, content TEXT NOT NULL, fetched_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS extract_cache (url TEXT NOT NULL, query_key TEXT NOT NULL DEFAULT '', content TEXT NOT NULL, fetched_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (url, query_key));
 """
 
 TASK_STATUSES = {
@@ -63,6 +63,10 @@ def connect(path: str = "research.db") -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode = WAL")
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     has_tables = conn.execute("SELECT count(*) FROM sqlite_master WHERE name='tasks'").fetchone()[0]
+    if has_tables and version == 2:
+        # v2 -> v3 only changes the extract cache key (URL -> URL + query). It is a cache, so drop and rebuild it.
+        conn.execute("DROP TABLE IF EXISTS extract_cache")
+        version = SCHEMA_VERSION
     if has_tables and version != SCHEMA_VERSION:
         conn.close()
         raise SchemaMismatch(f"{path} uses an older schema (v{version}); move it aside or delete it.")
@@ -328,17 +332,17 @@ def put_search_cache(conn, key: str, query: str, params: dict, results: list[dic
     conn.commit()
 
 
-def get_extract_cache(conn, urls: list[str], ttl_days: int) -> dict[str, str]:
+def get_extract_cache(conn, urls: list[str], query_key: str, ttl_days: int) -> dict[str, str]:
     if not urls:
         return {}
     rows = conn.execute(
-        f"""SELECT url, content FROM extract_cache WHERE url IN ({','.join('?' * len(urls))})
-            AND fetched_at >= datetime('now', ?)""", (*urls, f"-{int(ttl_days)} days")).fetchall()
+        f"""SELECT url, content FROM extract_cache WHERE url IN ({','.join('?' * len(urls))}) AND query_key = ?
+            AND fetched_at >= datetime('now', ?)""", (*urls, query_key, f"-{int(ttl_days)} days")).fetchall()
     return {r[0]: r[1] for r in rows}
 
 
-def put_extract_cache(conn, pages: dict[str, str]) -> None:
+def put_extract_cache(conn, pages: dict[str, str], query_key: str) -> None:
     ts = now()
-    conn.executemany("INSERT OR REPLACE INTO extract_cache (url, content, fetched_at) VALUES (?, ?, ?)",
-                     [(u, c, ts) for u, c in pages.items()])
+    conn.executemany("INSERT OR REPLACE INTO extract_cache (url, query_key, content, fetched_at) VALUES (?, ?, ?, ?)",
+                     [(u, query_key, c, ts) for u, c in pages.items()])
     conn.commit()

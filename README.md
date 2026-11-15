@@ -153,7 +153,7 @@ flowchart TD
     B --> PL["2. Plan (STRONG)<br/>3-5 broad queries"]
     PL --> A[3. Approval<br/>UI button / CLI prompt or --yes]
     A --> R["4. Research workers (parallel)<br/>Tavily search: tiers, start_date, cache<br/>snippet scoring, batched extract, cache<br/>FAST notes with verified numbers/design/population"]
-    R --> CV["5. Coverage (STRONG)<br/>aspects: covered / thin / conflict<br/>independence = distinct domains, in code"]
+    R --> CV["5. Coverage (STRONG)<br/>aspects: covered / thin / conflict<br/>independence = distinct sites, in code"]
     CV -- thin or conflict, no stop rule --> R
     CV -- stop rule --> W["6. Write (STRONG)<br/>from notes only"]
     W --> V["7. Verify<br/>number check in code, then FAST verifier vs original excerpt"]
@@ -177,7 +177,7 @@ flowchart TD
    - Each worker scores its hits on the **snippets** (Tavily score blended with term overlap) and sends only its top 2 URLs to extraction.
    - The round's URLs are extracted together, at most 20 per call, after checking the cache.
 4. **Coverage.** The STRONG model labels each aspect covered, thin or conflicting, and cites evidence IDs.
-   - Code, not the model, decides whether an aspect has **≥2 independent sources**, meaning two distinct domains.
+   - Code, not the model, decides whether an aspect has **≥2 independent sources**, meaning two distinct sites (subdomains of one site, such as pubmed.ncbi.nlm.nih.gov and ncbi.nlm.nih.gov, count once).
    - Follow-up queries are generated only for thin or conflicting aspects. They run at advanced depth over tiers 1–3.
    - A query is skipped if it overlaps an earlier one by ≥0.7 (term Jaccard).
 5. **Stop rules**, checked in this order. The first that fires is saved to `tasks.stop_reason`:
@@ -221,11 +221,14 @@ flowchart TD
   - A population needs a verbatim population sentence that states it.
   - Anything that fails is dropped and logged.
 - **The writer** sees notes and trusted metadata only, never raw page text.
-- **Numbers.** Before the LLM verifier runs, code checks that every number in a claim (HR, %, months, p-values, doses, dates) appears in that claim's stored verbatim source sentence, and that the sentence appears in the cited excerpt. A failure marks the citation **unsupported** without calling the LLM and sends the claim to repair. Numbers inside names such as HER2, CDK4/6, PD-1, G12C or "phase 3" are not checked as results.
-- **Evidence level** may only name phase or design words stated in a cited excerpt; otherwise it is "not stated".
-- **Population** must come from a verified note for a cited source; otherwise it is "population not stated". It is never inferred.
+- **Numbers.** Before the LLM verifier runs, code checks that every number in a claim (HR, %, months, p-values, doses, dates) appears in that claim's stored verbatim source sentence, and that the sentence (at least four words) appears as whole words in the cited excerpt, so "5%" never matches inside "45%". Both ends of a range or confidence interval (30-40%, 0.58-0.85) are checked. A failure marks the citation **unsupported** without calling the LLM and sends the claim to repair. Numbers inside names such as HER2, CDK4/6, PD-1, G12C or "phase 3" are not checked as results.
+- **Evidence level** may only name phase or design words stated in a cited excerpt, and not negated there ("non-randomized" or "not randomized" never supports "randomized"); otherwise it is "not stated".
+- **Population** must come from a verified note for a cited source; otherwise it is "population not stated". It is never inferred, and a negated term never matches ("without brain metastases" doesn't support "with brain metastases"; "non-small cell" doesn't support "small cell").
 - **Verifier (FAST).** Each claim–citation pair is checked against the original excerpt and gets `supported`, `partial`, `unsupported` or `source_unavailable`.
-- **Repair (once).** Unsupported or partial claims go back to the STRONG writer with the verifier's note. The writer may revise the claim, cite other evidence, or mark it uncertain. Only revised claims are re-verified. Anything still unsupported is shown **FLAGGED: not verified** and never as verified. If nothing is supported, the task ends `insufficient_evidence`.
+- **Claim verdict.** A claim takes the *worst* verdict among its checked citations, so one supporting source can't hide another that doesn't state the claim. Only `supported` counts as verified: `partial` means different numbers, dates or populations, so it is flagged. A `source_unavailable` citation (login wall) is ignored when another citation was checked.
+- **Repair (once).** Claims with any partial or unsupported citation go back to the STRONG writer with the verifier's notes. The writer may revise the claim, drop the citations that don't state it, cite other evidence, or mark it uncertain. Only revised claims are re-verified. Anything not fully supported is shown **FLAGGED: not verified** and never as verified. If nothing is supported, the task ends `insufficient_evidence`.
+- **Dates.** An item's date is kept only if a cited source carries a matching date; otherwise the latest cited source date is used. An item dated before the anchor is marked uncertain, shown as **DATED BEFORE [anchor]: not new**, and does not count as a new verified development.
+- **Bottom line.** It may only state what the verified items state. It is kept as drafted only when every item verified unchanged and its numbers all come from verified items. Otherwise it is rewritten from the verified items alone, and its numbers are checked again in code; if that fails, a plain bottom line naming the newest verified item is used. With no verified items there is no bottom line.
 
 ## Safety and governance
 
@@ -288,7 +291,7 @@ Both use the standard library only.
   | **Total** | **31** |
 
   That is below the 60-credit budget, which also stops the loop. Extract is billed at 1 credit per 5 successful URLs at basic depth.
-- **Cache:** repeat questions within 7 days reuse cached searches and pages at 0 credits.
+- **Cache:** repeat questions within 7 days reuse cached searches and pages at 0 credits. Searches are keyed by the exact query (only case and spacing are normalized, so "stage II" and "stage IV" never share results) and its parameters. Extracted pages are keyed by URL and question, because Tavily returns the chunks relevant to that question. Empty search results are not cached.
 - **Latency:** dominated by LLM calls. The defaults are 120 s per LLM request, 30 s per search, 60 s per extract, and a 420 s research budget.
 
 ## Example brief (mocked run, redacted trace)
@@ -326,7 +329,7 @@ Drugx improved progression-free survival. (confidence: high; phase 3 data)
 
 Stop reason: coverage_complete
 Tavily credits: 5 · tokens: 900 in / 180 out
-Models: strong=deepseek-ai/DeepSeek-V4-Pro, fast=deepseek-ai/DeepSeek-V4-Flash · prompt version: onc-2026.11.1
+Models: strong=deepseek-ai/DeepSeek-V4-Pro, fast=deepseek-ai/DeepSeek-V4-Flash · prompt version: onc-2026.11.2
 
 TRACE
   [brief   ] Brief written                                   (deepseek-ai/DeepSeek-V4-Pro)
@@ -384,4 +387,4 @@ TRACE
 - answer structure: `answer_json`, `section`, `population`, `item_date`, `notes.details`, `claim_citations.source_sentence`
 - two cache tables: `search_cache` and `extract_cache`
 
-`research.db` is versioned (`PRAGMA user_version = 2`). An older database is refused with a clear message rather than silently migrated.
+`research.db` is versioned (`PRAGMA user_version = 3`). A v2 database is upgraded by rebuilding its extract cache (the only change); anything older is refused with a clear message rather than silently migrated.
