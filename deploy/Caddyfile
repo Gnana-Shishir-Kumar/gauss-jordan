@@ -1,0 +1,11 @@
+# HTTPS reverse proxy for the Streamlit app. Caddy obtains and renews the certificate for $DOMAIN
+# automatically (the domain's DNS A record must point at the VM, and ports 80/443 must be open).
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy app:8501
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+	}
+}
