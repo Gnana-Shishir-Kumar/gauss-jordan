@@ -275,9 +275,19 @@ Both use the standard library only.
 
 ## Credit and latency numbers
 
-**Live numbers have not been measured yet.** Run `evals/run_evals.py` and paste the summary here. What is known now:
+**Measured live** on 2026-11-15, with the live smoke-test question (first-line EGFR-mutant metastatic NSCLC since 2024-06-01), default settings and an empty cache:
 
-- **Mocked happy path:** 3 basic searches (3 credits) plus one extract batch of 6 URLs (2 credits) = **5 credits**, one round, stop reason `coverage_complete`.
+| | Value |
+|---|---|
+| Result | `done`, stop reason `max_rounds`; 5 items and 1 conflict, every claim verified or repaired |
+| Tavily credits | **11**: round 1 had 5 basic searches (5) and one extract batch (1); round 2 had 2 advanced searches (4) and one extract batch (1) |
+| Wall time | about **8 minutes** (3.5 to 6 s per search, under 5 s per extract batch) |
+| Tokens | 31,193 input / 69,510 output |
+| Slowest LLM calls | writer 165 s (about 16,000 output tokens), notes 19 to 103 s each, coverage 51 to 55 s each |
+| Fastest LLM calls | verifier 2 to 5 s per claim |
+
+The first live attempt ran with the original settings: 3 rounds, a 4,096-token output limit and no per-aspect cap. It used **23 credits** and then failed at the writer, because the token limit cut off its JSON. That run is why the output limit, timeout, round count and follow-up cap are what they are now.
+
 - **Worst case under the defaults:**
 
   | Item | Credits |
@@ -290,63 +300,126 @@ Both use the standard library only.
 
   That is below the 60-credit budget, which also stops the loop. Extract is billed at 1 credit per 5 successful URLs at basic depth.
 - **Cache:** repeat questions within 7 days reuse cached searches and pages at 0 credits.
-- **Latency:** dominated by LLM calls. These models write long reasoning before their JSON (5,000–7,000 output tokens per notes call in a live run), so each call is allowed up to 16,384 output tokens (`llm_max_tokens`) and 300 s (the writer took 165 s in a live run). Other defaults: 30 s per search, 60 s per extract, and a 420 s research budget.
+- **Latency:** dominated by LLM calls. These models write long reasoning before their JSON, so each call is allowed up to 16,384 output tokens (`llm_max_tokens`) and 300 s. Other defaults: 30 s per search, 60 s per extract, and a 420 s research budget.
+- **Across questions:** these numbers come from one question. Run `evals/run_evals.py` for averages over all 15.
 
-## Example brief (mocked run, redacted trace)
+## Example brief (live run, redacted trace)
 
-> Produced by the mocked test fixtures, with a fictional drug ("drugx"), to show the format. Replace it with a live run before relying on any content.
+> A real run from 2026-11-15, shown to illustrate the output. It is a snapshot of web sources from that day, **not clinical guidance**: check the sources before acting.
+>
+> **Redactions:** long claim text and queries are trimmed with `[…]` and the per-call token counts are removed. Traces never contain patient data, identifiers or API keys.
 
 ```
-Question: What has changed for first-line EGFR-mutant metastatic NSCLC since January 2025?
+Question: What has changed for first-line treatment of metastatic EGFR-mutant non-small cell lung cancer since 2024-06-01?
 Status:   done
 
 BRIEF
 Cancer type: non-small cell lung cancer
-Setting: metastatic, first line, EGFR mutation
-Since: 2025-01-01
-Aspects: regulatory approvals; phase 3 trial results
+Setting: metastatic, first line, EGFR-mutant
+Since: 2024-06-01
+Aspects: regulatory approvals and label changes; guideline updates; trial readouts and conference data;
+         safety communications; trial status changes
 
 1. BOTTOM LINE
-Drugx improved progression-free survival. (confidence: high; phase 3 data)
+First-line treatment of metastatic EGFR-mutant NSCLC has shifted toward combination regimens, with FDA approval
+of amivantamab plus lazertinib and ASCO living guideline endorsement of combination therapy as preferred, while
+osimertinib monotherapy remains an option for patients prioritizing tolerability. (confidence: moderate;
+multiple tier 1 and 2 sources support the shift, but some dates are unknown and OS/comparative data remain preliminary.)
 
-2. WHAT'S NEW SINCE 2025-01-01 (newest first)
-1. 2025-06-01 · Regulatory action · Tier 1
-   What changed: Progression-free survival was 23.7 months versus 16.6 months with drugx (HR 0.70).  [fact; supported]
-   Evidence level: phase 3 randomized trial · Not peer reviewed (regulatory action)
-   Population: adults aged 18 years or older in North America and Asia
+2. WHAT'S NEW SINCE 2024-06-01 (newest first)
+1. 2025-11-19 · Peer-reviewed article · Tier 1
+   What changed: An individual patient data comparison of FLAURA2 and MARIPOSA found a statistically significant
+   PFS difference favoring FLAURA2 in the ITT population (HR 0.79), not confirmed for OS; […]  [fact; supported]
+   Evidence level: phase 3 clinical trials · Peer-reviewed
+   Population: population not stated
    Key numbers (source sentences):
-     E1: "Median progression-free survival was 23.7 months versus 16.6 months (HR 0.70; p<0.001)."
-   Source E1: https://fda.gov/[redacted] (supported)
-2. 2025-06-01 · Peer-reviewed article · Tier 2
-   ... same finding, Peer-reviewed, Source E2: https://nejm.org/[redacted] (supported)
+     E69: "In progression free survival (PFS), there was a statistically significant difference favoring the FLAURA2
+           in the intent-to-treat (ITT) population [Hazard ratio (HR) 0.79], not confirmed in the overall survival
+           (OS) analysis where we did not find any significant difference."
+     […]
+   Source E69: https://pubmed.ncbi.nlm.nih.gov/41270639 (supported)
+2. 2024-08-19 · Regulatory action · Tier 1
+   What changed: FDA approved lazertinib in combination with amivantamab-vmjw for first-line treatment of locally
+   advanced or metastatic NSCLC with EGFR exon 19 deletions or exon 21 L858R substitution mutations; lazertinib with
+   amivantamab improved PFS versus osimertinib (HR 0.70), median PFS 23.7 versus 16.6 months.  [fact; supported]
+   Evidence level: regulatory decision · Not peer reviewed (regulatory action)
+   Population: first-line treatment of locally advanced or metastatic NSCLC with EGFR exon 19 deletions or exon 21
+               L858R substitution mutations
+   Key numbers (source sentences):
+     E67: "Lazertinib with amivantamab demonstrated a statistically significant improvement in PFS compared to
+           osimertinib with a hazard ratio of 0.70 (95% confidence interval [CI]: 0.58, 0.85; p-value=0.0002)."
+     E67: "The median PFS was 23.7 months (95% CI: 19.1, 27.7) in the lazertinib with amivantamab arm and 16.6
+           months (95% CI: 14.8, 18.5) in the osimertinib arm."
+   Source E67: https://fda.gov/drugs/resources-information-approved-drugs/fda-approves-lazertinib-amivantamab-vmjw-non-small-lung-cancer (supported)
+3. date not stated · Peer-reviewed article · Tier 2
+   What changed: ASCO living guideline: FLAURA2 and MARIPOSA support superior efficacy of combination treatment versus
+   osimertinib alone; clinicians should consider combination regimens the preferred option, with osimertinib
+   monotherapy remaining an option for patients prioritizing tolerability; […]  [fact; supported]
+   Evidence level: expert guideline · Peer-reviewed
+   Source E45: https://ascopubs.org/doi/10.1200/JCO-25-02822 (supported)
+4. date not stated · Peer-reviewed article · Tier 2
+   What changed: An exploratory overall survival analysis of FLAURA2 in patients with poorer prognostic factors was
+   published in Annals of Oncology; the publication year is not established.  [uncertain; partial]
+   (failed the number check on the first draft; repaired, then re-verified as partial)
+5. date not stated · Conference abstract · Tier 1
+   What changed: In descriptive risk analyses, any-grade VTE incidence was numerically higher with amivantamab plus
+   lazertinib (21%) than with amivantamab (11%) or lazertinib (11%) monotherapy.  [fact; supported]
+   Evidence level: descriptive univariate risk analyses · PRELIMINARY (conference abstract), not peer reviewed
+   Key numbers (source sentences):
+     E66: "The incidence of VTE events of any grade was numerically higher in pts who received ami+laz (21%) than
+           those who received ami (11%) or laz (11%) monotherapy."
+   Source E66: https://asco.org/abstracts-presentations/218907 (supported)
 
-3. SOURCES DISAGREE      No conflicts found.
-4. NOT YET ESTABLISHED   - overall survival benefit
-5. CHECK BEFORE ACTING   - confirm label wording on fda.gov
-6. Clinician-support tool. ... Use limits: ...
+3. SOURCES DISAGREE
+1. One source describes osimertinib as the preferred first-line option; the ASCO living guideline now states
+   combination regimens should be considered preferred.  [uncertain; supported]
+   Sources E45 (ascopubs.org) and E47 (ncbi.nlm.nih.gov/pmc) (both supported)
 
-Stop reason: coverage_complete
-Tavily credits: 5 · tokens: 900 in / 180 out
+4. NOT YET ESTABLISHED
+- No direct head-to-head FLAURA2 versus MARIPOSA trial; the indirect comparison suggests a PFS difference but OS was not confirmed.
+- VTE risk with amivantamab plus lazertinib is based on descriptive univariate analyses, not a definitive safety analysis.
+- Exact dates of the ASCO living guideline update and the VTE analysis are not stated in the evidence.
+- […]
+
+5. CHECK BEFORE ACTING
+- Confirm current FDA label wording for lazertinib/amivantamab, including exact mutation indications.
+- Confirm ASCO living guideline version and date.
+- Confirm VTE risk data in a peer-reviewed publication or full safety analysis.
+- […]
+
+6. Clinician-support tool. […] Use limits: […]
+
+Stop reason: max_rounds
+Tavily credits: 11 · tokens: 31193 in / 69510 out
 Models: strong=deepseek-ai/DeepSeek-V4-Pro-0813, fast=deepseek-ai/DeepSeek-V4.1-Flash-1017 · prompt version: onc-2026.11.2
 
 TRACE
-  [brief   ] Brief written                                   (deepseek-ai/DeepSeek-V4-Pro-0813)
-  [plan    ] Planned 3 queries                               (deepseek-ai/DeepSeek-V4-Pro-0813)
+  [brief   ] Brief written                                              (4 s, STRONG)
+  [plan    ] Planned 5 queries                                          (6 s, STRONG)
   [approval] Waiting for approval / Approved; research started
-  [round   ] Round 1: 3 queries, basic depth, tiers [1, 2]
-  [search  ] 2 results for '[query 1]' (basic, tiers [1, 2])  (1 cr)
-  [search  ] 2 results for '[query 2]' (basic, tiers [1, 2])  (1 cr)
-  [search  ] 2 results for '[query 3]' (basic, tiers [1, 2])  (1 cr)
-  [extract ] Extracted 6/6 URLs in one batch                 (2 cr)
-  [evidence] Kept 2/2 for '[query 1]'   (x3)
-  [notes   ] 2 notes for '[query 1]'    (x3)                 (deepseek-ai/DeepSeek-V4.1-Flash-1017)
-  [coverage] 2/2 aspects have >= 2 independent sources; 0 follow-up queries
-  [stop    ] Research stopped after round 1: coverage_complete
-  [write   ] Drafted 2 items, 0 conflicts (sufficient=True)  (deepseek-ai/DeepSeek-V4-Pro-0813)
-  [check   ] Claim 1: numeric check passed
-  [verify  ] Claim 1: 1 supported                            (deepseek-ai/DeepSeek-V4.1-Flash-1017)
-  [check   ] Claim 2: numeric check passed
-  [verify  ] Claim 2: 1 supported
+  [round   ] Round 1: 5 queries, basic depth, tiers [1, 2]
+  [search  ] 10 results for 'first-line EGFR-mutant NSCLC safety communication FDA EMA 2024 2025'  (1 cr)
+  [search  ] 10 results for '[…] clinical trial status change 2024 2025'                         (1 cr)
+  [search  ] 10 results for '[…] trial results ASCO ESMO WCLC 2024 2025'                         (1 cr)
+  [search  ] 10 results for 'NCCN ESMO guideline update first-line EGFR-mutant metastatic NSCLC […]' (1 cr)
+  [search  ] 10 results for 'FDA EMA regulatory approval label change […]'                        (1 cr)
+  [extract ] Extracted 8/10 URLs in one batch     (2 failed: annalsofoncology.org, oncologypro.esmo.org -> source_unavailable)  (1 cr)
+  [evidence] Kept 2/2 for each of 4 queries
+  [notes   ] 4 + 2 + 4 + 3 notes                                        (19-103 s each, FAST)
+  [coverage] 2/5 aspects have >= 2 independent sources; 2 follow-up queries
+             (2 more skipped: "aspect already covered")                 (55 s, STRONG)
+  [round   ] Round 2: 2 queries, advanced depth, tiers [1, 2, 3]
+  [search  ] 10 results for 'MARIPOSA FLAURA2 clinical trial status update ClinicalTrials.gov 2025'  (2 cr)
+  [search  ] 10 results for 'amivantamab lazertinib safety warning venous thromboembolism FDA 2025'  (2 cr)
+  [extract ] Extracted 4/4 URLs in one batch                            (1 cr)
+  [notes   ] 3 + 7 notes                                                (54-55 s each, FAST)
+  [coverage] 2/5 aspects have >= 2 independent sources                  (51 s, STRONG)
+  [stop    ] Research stopped after round 2: max_rounds
+  [write   ] Drafted 5 items, 1 conflicts (sufficient=True)             (165 s, STRONG)
+  [check   ] Claims 1, 4, 5: numeric check passed · Claim 3: numeric check failed
+  [verify  ] Claims 1, 2, 4, 5: supported · Claim 6: 2 supported        (2-5 s each, FAST)
+  [repair  ] Revised 1/1 failed claims                                  (23 s, STRONG)
+  [verify  ] Claim 3: 1 partial
   [done    ] Finished: done
 ```
 
