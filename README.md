@@ -303,6 +303,35 @@ The first live attempt ran with the original settings: 3 rounds, a 4,096-token o
 - **Latency:** dominated by LLM calls. These models write long reasoning before their JSON, so each call is allowed up to 16,384 output tokens (`llm_max_tokens`) and 300 s. Other defaults: 30 s per search, 60 s per extract, and a 420 s research budget.
 - **Across questions:** these numbers come from one question. Run `evals/run_evals.py` for averages over all 15.
 
+### Credits vs traditional search
+
+`evals/credit_comparison.py` replays a stored run's own queries and search results under traditional strategies, so it makes no new API calls. For the live run above:
+
+| Strategy | Search credits | Extract calls | Pages extracted | Extract credits | **Total** | vs project |
+|---|---|---|---|---|---|---|
+| **This project** (billed): snippet scoring, top results only, batched extract, basic depth in round 1 | 9 | 2 | 14 | 2 | **11** | 1.0x |
+| Fetch every result, batched 20 per call | 9 | 4 | 67 | 14 | **23** | 2.1x |
+| Fetch every result, one call per page | 9 | 67 | 67 | 67 | **76** | 6.9x |
+| Advanced search + fetch every page | 14 | 67 | 67 | 67 | **81** | 7.4x |
+
+Asking the same question again within 7 days costs the project **0** credits (cache), against 23–81 for the traditional strategies.
+
+Where the savings come from:
+- **Reading snippets first.** The 7 searches returned 67 unique pages. Scoring the snippets let the project extract only the 14 most relevant, instead of fetching all 67.
+- **Batching extraction.** Pages from a round are extracted together, up to 20 per call, instead of one call per page.
+- **Depth by need.** Round 1 uses basic search (1 credit). Only targeted follow-ups use advanced (2 credits), and only one per thin aspect.
+- **The cache.** Searches and pages are reused for 7 days.
+
+How the numbers are computed:
+- The project row is what Tavily actually billed.
+- The other rows price the same queries and results at Tavily's published rates: search 1 credit (basic) or 2 (advanced); extract 1 credit per 5 successful URLs, rounded up per call.
+- Rounding up per call is what makes one-page-per-call expensive. If Tavily instead pooled fractions across calls, that row would fall to about 23, the same as the batched row, and the snippet-scoring and cache savings would remain.
+- In this run Tavily billed slightly less for extraction than the published rate (2 credits for 14 pages, against 3).
+
+```bash
+uv run python evals/credit_comparison.py --markdown    # latest finished task in research.db
+```
+
 ## Example brief (live run, redacted trace)
 
 > A real run from 2026-11-15, shown to illustrate the output. It is a snapshot of web sources from that day, **not clinical guidance**: check the sources before acting.

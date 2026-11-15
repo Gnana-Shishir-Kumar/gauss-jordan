@@ -100,8 +100,9 @@ async def _search(ctx: RunContext, brief: dict, sq_id: int, query: str, depth: s
         t0 = time.perf_counter()
         hits = cache.get_search(ctx.conn, key, ctx.settings.cache_ttl_days)
         if hits is not None:
-            await ctx.emit("search", f"Cache hit: {len(hits)} results for '{query}'", credits=0.0,
-                           detail={**detail, "cached": True}, latency_ms=_ms(t0))
+            await ctx.emit("search", f"Cache hit: {len(hits)} results for '{query}'", credits=0.0, latency_ms=_ms(t0),
+                           detail={**detail, "cached": True,
+                                   "results": [{"url": h.url, "score": h.score} for h in hits]})
         else:
             try:
                 res = await with_retry(
