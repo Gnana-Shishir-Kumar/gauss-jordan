@@ -147,6 +147,65 @@ def test_coverage_check_failure_stops_with_reason(agent, conn):
     assert r["task"]["status"] == "done"  # still writes from the notes it has
 
 
+# --- citation ids ------------------------------------------------------------------
+
+def _cite_notes(style):
+    """Writer that cites note numbers (the live-run bug) instead of evidence numbers."""
+    def draft(call):
+        from conftest import NUM_SENTENCE
+        notes = [n for n in notes_with_numbers(call.llm.conn) if NUM_SENTENCE in str(n["details"])][:2]
+        ref = (lambda n: f"N{n['id']}") if style == "N" else (lambda n: n["id"])
+        return {"sufficient": True, "bottom_line": {"text": "b", "confidence": "moderate", "reason": "r"},
+                "items": [{"text": GOOD_TEXT, "claim_type": "fact", "evidence_ids": [ref(n)],
+                           "evidence_level": "phase 3 randomized trial",
+                           "numbers": [{"value": v, "sentence": NUM_SENTENCE, "evidence_id": ref(n)}
+                                       for v in ("23.7", "16.6", "0.70")]} for n in notes]}
+    return draft
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("style", ["N", "bare"])
+def test_note_numbers_cited_as_evidence_are_mapped(agent, conn, style):
+    # 4 domains -> 2 hits per query are dropped (not selected) first, so low evidence ids are dropped pages,
+    # exactly like the live run where the writer's note numbers collided with them.
+    search = FakeSearch(domains=("fda.gov", "nejm.org", "nature.com", "ascopubs.org"))
+    r = agent.full(FakeLLM(conn, Draft=_cite_notes(style)), search)
+    claims = r["claims"]
+    assert claims and r["task"]["status"] == "done"
+    kept = {e["id"] for e in r["evidence"] if e["kept"]}
+    for c in claims:
+        assert {x["evidence_id"] for x in c["citations"]} <= kept
+        assert all(x["verdict"] == "supported" for x in c["citations"])
+        assert c["citations"][0]["source_sentence"]
+    assert any("mapped N" in t["message"] for t in trace_steps(r, "write"))
+
+
+def test_repair_accepts_numbers_without_value(agent, conn):
+    """Live bug: the model omitted a number's "value"; repair failed validation and claims stayed flagged."""
+    def verify(call):
+        from conftest import blocks
+        ok = "(revised)" in call.user
+        return {"verdicts": [{"evidence_id": e, "verdict": "supported" if ok else "partial", "note": "n"}
+                             for e, _ in blocks(call.user)]}
+
+    def repair(call):
+        from conftest import h_repair
+        out = h_repair(call)
+        for c in out["claims"]:
+            for n in c["numbers"]:
+                n.pop("value")  # sentence + evidence id only
+            c["numbers"][0]["value"] = 0.7  # and one bare number instead of a string
+        return out
+
+    r = agent.full(FakeLLM(conn, ClaimVerification=verify, Repair=repair), FakeSearch())
+    assert not [t for t in trace_steps(r, "repair") if t["level"] == "error"]
+    claims = [c for c in r["claims"] if c["section"] == "new"]
+    assert claims and all(c["revised"] for c in claims)
+    assert all(x["verdict"] == "supported" and x["source_sentence"] for c in claims for x in c["citations"])
+
+
 # --- repair loop -----------------------------------------------------------------
 
 def verify_unless_revised(call):

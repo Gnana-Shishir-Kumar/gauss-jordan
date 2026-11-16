@@ -25,6 +25,22 @@ def test_cli_yes_runs_and_exports_ris(monkeypatch, tmp_path, capsys):
     assert out.read_text(encoding="utf-8").startswith("TY  - ")
 
 
+def test_cli_uses_fresh_clients_for_the_run(monkeypatch, tmp_path, capsys):
+    db = str(tmp_path / "t.db")
+    made = []
+
+    def clients(settings):
+        made.append((FakeLLM(storage.connect(db)), FakeSearch()))
+        return made[-1]
+
+    monkeypatch.setattr(cli, "default_clients", clients)
+    monkeypatch.setattr(cli, "get_settings", lambda: make_settings())
+    assert cli.main(["What changed for EGFR NSCLC since 2025?", "--yes", "--db", db, "--quiet"]) == 0
+    assert len(made) == 2  # prepare and run each get their own clients (separate event loops)
+    assert made[0][0].count("Brief") == 1 and made[0][0].count("Draft") == 0
+    assert made[1][0].count("Draft") == 1
+
+
 def test_cli_without_yes_does_not_run_non_interactively(monkeypatch, tmp_path, capsys):
     db = str(tmp_path / "t.db")
     _patch(monkeypatch, {"path": db})

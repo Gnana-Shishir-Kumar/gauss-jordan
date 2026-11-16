@@ -61,9 +61,31 @@ def test_login_blocked_guideline_page(agent, conn):
     ev = next(e for e in r["evidence"] if e["url"] == "https://nccn.org/drugx-egfr-nsclc-fda-approval")
     assert not ev["kept"] and ev["drop_reason"].startswith("source_unavailable") and "login" in ev["drop_reason"]
     assert ev["source_type"] == "guideline" and ev["trust_tier"] == 1
-    nccn_claim = next(c for c in r["claims"] if c["text"].startswith("NCCN"))
-    assert nccn_claim["citations"][0]["verdict"] == "source_unavailable"
+    # The blocked page never counts as support for any claim.
+    assert all(not (x["evidence_id"] == ev["id"] and x["verdict"] in ("supported", "partial"))
+               for c in r["claims"] for x in c["citations"])
     assert r["task"]["status"] == "done"  # the run continued with the other sources
+
+
+def test_citation_to_unavailable_evidence_gets_source_unavailable(agent, conn, settings):
+    import asyncio
+
+    from research_agent import storage
+    from research_agent.engine.context import RunContext
+    from research_agent.engine.verifier import verify_claims
+
+    tid = storage.create_task(conn, "q")
+    sq = storage.add_sub_query(conn, tid, "q")
+    src = storage.upsert_source(conn, "https://nccn.org/x", "nccn.org", "NCCN", None, None, 1, "guideline")
+    ev = storage.add_evidence(conn, tid, sq, src, "snippet only", 0.9, kept=False,
+                              drop_reason="source_unavailable: 403 Forbidden: login required")
+    cid = storage.add_claim(conn, tid, "NCCN updated its recommendation.", 0, "fact")
+    storage.add_citation(conn, cid, ev)
+    llm = FakeLLM(conn)
+    asyncio.run(verify_claims(RunContext(conn, tid, settings, llm, FakeSearch())))
+    cit = storage.get_claims(conn, tid)[0]["citations"][0]
+    assert cit["verdict"] == "source_unavailable" and "login required" in cit["verifier_note"]
+    assert llm.count("ClaimVerification") == 0  # never sent to the LLM verifier
 
 
 def test_population_not_stated_when_not_in_sources(agent, conn):

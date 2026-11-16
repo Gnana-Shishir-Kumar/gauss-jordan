@@ -20,15 +20,16 @@ VERDICTS = ("supported", "partial", "unsupported", "source_unavailable")
 
 
 def coerce_evidence_id(v: Any) -> int:
-    """Accept 12, "12", "E12", "[E12]"."""
+    """Accept 12, "12", "E12", "[E12]". A note reference ("N7") becomes -7 so the writer step can map it to
+    that note's evidence ids instead of mistaking it for evidence 7."""
     if isinstance(v, bool):
         raise ValueError("evidence id must be an integer")
     if isinstance(v, int):
         return v
-    m = re.fullmatch(r"\[?\s*E?(\d+)\s*\]?", str(v).strip(), flags=re.I)
+    m = re.fullmatch(r"\[?\s*([EN])?(\d+)\s*\]?", str(v).strip(), flags=re.I)
     if not m:
         raise ValueError(f"invalid evidence id {v!r}")
-    return int(m.group(1))
+    return -int(m.group(2)) if (m.group(1) or "").upper() == "N" else int(m.group(2))
 
 
 def _ids(v: Any) -> list[int]:
@@ -127,9 +128,20 @@ class Plan(BaseModel):
 
 # --- worker notes --------------------------------------------------------------
 
+def _value_str(v: Any) -> str:
+    """A number's value is informational only (checks read numbers from the text and sentence), so accept
+    missing values and bare numbers like 0.72."""
+    return "" if v is None else str(v)
+
+
 class NoteNumber(BaseModel):
-    value: str
+    value: str = ""
     sentence: str
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _v(cls, v: Any) -> str:
+        return _value_str(v)
 
 
 class Note(BaseModel):
@@ -217,9 +229,14 @@ class Coverage(BaseModel):
 # --- writer --------------------------------------------------------------------
 
 class ItemNumber(BaseModel):
-    value: str
+    value: str = ""
     sentence: str
     evidence_id: int
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _v(cls, v: Any) -> str:
+        return _value_str(v)
 
     @field_validator("evidence_id", mode="before")
     @classmethod
