@@ -56,15 +56,16 @@ def load_dotenv(path: str | Path = ".env") -> None:
 
 @dataclass(frozen=True)
 class Models:
-    strong: str = "deepseek-ai/DeepSeek-V4-Pro"  # brief, planner, coverage, writer, repair
-    fast: str = "deepseek-ai/DeepSeek-V4-Flash"  # worker notes, citation verification
+    strong: str = "deepseek-ai/DeepSeek-V4-Pro-0813"  # brief, planner, coverage, writer, repair
+    fast: str = "deepseek-ai/DeepSeek-V4.1-Flash-1017"  # worker notes, citation verification
 
 
 @dataclass(frozen=True)
 class Limits:
     min_queries: int = 3
     max_queries_per_round: int = 5
-    max_rounds: int = 3
+    max_rounds: int = 2
+    max_follow_ups_per_aspect: int = 1  # per follow-up round, only for thin/conflicting aspects
     max_repair_passes: int = 1
     search_results: int = 10
     extract_per_query: int = 2  # top URLs per worker sent to extraction
@@ -92,7 +93,8 @@ class Budget:
 
 @dataclass(frozen=True)
 class Network:
-    llm_timeout_s: float = 120.0
+    llm_timeout_s: float = 300.0  # the writer took 165 s in a live run; this is a ceiling, not a delay
+    llm_max_tokens: int = 16384  # these models spend many output tokens on reasoning before the JSON
     search_timeout_s: float = 30.0
     extract_timeout_s: float = 60.0
     max_retries: int = 3

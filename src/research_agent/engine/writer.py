@@ -9,7 +9,7 @@ from __future__ import annotations
 from .. import prompts, storage
 from ..render import claim_verdict
 from ..schemas import Draft, Item, Repair
-from .checks import check_design, check_population
+from .checks import check_design, check_population, contains
 from .context import RunContext, describe_error
 
 
@@ -32,10 +32,28 @@ async def write_draft(ctx: RunContext, brief: dict) -> Draft:
 async def apply_item(ctx: RunContext, item: Item, notes: list[dict], ev_by_id: dict[int, dict], *,
                      position: int = 0, section: str = "new", claim_id: int | None = None) -> int:
     """Validate and store one item (new claim, or an in-place revision when claim_id is given)."""
-    cited = list(dict.fromkeys([*item.evidence_ids, *(n.evidence_id for n in item.numbers)]))
+    label = f"claim {claim_id}" if claim_id else f"{section} item {position + 1}"
+    note_map = {n["id"]: n["evidence_ids"] for n in notes}
+    shown = {i for ids in note_map.values() for i in ids}  # evidence behind the notes the writer saw
+    remapped: dict[str, list[int]] = {}
+
+    def resolve(i: int) -> list[int]:
+        """Map a citation to evidence ids. Note references ("N7", or a bare number that is a note id but not
+        evidence the writer saw) become that note's evidence; the mapping comes from our DB, not the model."""
+        if i < 0 or (i not in shown and i in note_map):
+            ids = note_map.get(abs(i), [])
+            remapped[f"N{abs(i)}"] = ids
+            return ids
+        return [i]
+
+    cited = list(dict.fromkeys(e for i in [*item.evidence_ids, *(n.evidence_id for n in item.numbers)]
+                               for e in resolve(i)))
+    if remapped:
+        await ctx.emit("write", f"{label} cited notes instead of evidence; mapped "
+                       + ", ".join(f"{k} -> {', '.join(f'E{e}' for e in v) or 'nothing'}" for k, v in remapped.items()),
+                       level="warning", detail={"remapped": remapped})
     valid = [i for i in cited if i in ev_by_id]
     unknown = [i for i in cited if i not in ev_by_id]
-    label = f"claim {claim_id}" if claim_id else f"{section} item {position + 1}"
     ctype = item.claim_type
     if unknown:
         await ctx.emit("write", f"{label} cited nonexistent evidence {unknown}; ignored", level="warning")
@@ -56,9 +74,17 @@ async def apply_item(ctx: RunContext, item: Item, notes: list[dict], ev_by_id: d
     else:
         storage.update_claim(ctx.conn, claim_id, revised=1, **fields)
         storage.delete_citations(ctx.conn, claim_id)
+    # Attach each number's source sentence to the cited evidence whose excerpt contains it.
+    sentences: dict[int, list[str]] = {}
+    for n in item.numbers:
+        targets = [e for e in resolve(n.evidence_id) if e in valid]
+        holders = [e for e in targets if contains(ev_by_id[e]["excerpt"], n.sentence)] or targets[:1]
+        for e in holders:
+            sentences.setdefault(e, [])
+            if n.sentence.strip() not in sentences[e]:
+                sentences[e].append(n.sentence.strip())
     for eid in valid:
-        sentences = list(dict.fromkeys(n.sentence.strip() for n in item.numbers if n.evidence_id == eid))
-        storage.add_citation(ctx.conn, claim_id, eid, "\n".join(sentences) or None)
+        storage.add_citation(ctx.conn, claim_id, eid, "\n".join(sentences.get(eid, [])) or None)
     return claim_id
 
 

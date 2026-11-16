@@ -60,8 +60,46 @@ def test_stops_at_max_rounds(agent, conn):
                 "follow_up_queries": [f"unique angle number{i} alpha{i} beta{i}"]}
 
     r = agent.full(FakeLLM(conn, Coverage=always_thin), FakeSearch())
-    assert max(s["round"] for s in r["sub_queries"]) == 3
+    assert max(s["round"] for s in r["sub_queries"]) == agent.settings.limits.max_rounds == 2
     assert r["task"]["stop_reason"] == "max_rounds"
+
+
+def test_follow_ups_capped_per_aspect(agent, conn):
+    n = itertools.count()
+
+    def many(call):
+        if next(n):
+            from conftest import h_coverage_complete
+            return h_coverage_complete(call)
+        return {"aspects": [{"aspect": "safety communications", "status": "thin"},
+                            {"aspect": "trial results", "status": "thin"}],
+                "follow_up_queries": [
+                    {"aspect": "safety communications", "query": "drugx FDA safety communication 2025"},
+                    {"aspect": "safety communications", "query": "drugx boxed warning label update"},
+                    {"aspect": "safety communications", "query": "drugx interstitial lung disease alert"},
+                    {"aspect": "trial results", "query": "drugx overall survival readout"},
+                ]}
+
+    r = agent.full(FakeLLM(conn, Coverage=many), FakeSearch())
+    round2 = [s["text"] for s in r["sub_queries"] if s["round"] == 2]
+    assert round2 == ["drugx FDA safety communication 2025", "drugx overall survival readout"]
+    capped = trace_steps(r, "coverage")[0]["detail"]["skipped_by_aspect_cap"]
+    assert [c["reason"] for c in capped] == ["per-aspect cap", "per-aspect cap"]
+
+
+def test_no_follow_up_for_an_aspect_already_covered(agent, conn):
+    from conftest import h_coverage_complete
+
+    def covered_but_asks(call):
+        out = h_coverage_complete(call)
+        out["aspects"].append({"aspect": "safety communications", "status": "thin"})
+        out["follow_up_queries"] = [{"aspect": "regulatory approvals", "query": "drugx approval news"}]
+        return out
+
+    r = agent.full(FakeLLM(conn, Coverage=covered_but_asks), FakeSearch())
+    assert r["task"]["stop_reason"] == "no_new_queries"
+    capped = trace_steps(r, "coverage")[0]["detail"]["skipped_by_aspect_cap"]
+    assert capped[0]["reason"] == "aspect already covered"
 
 
 def test_stops_when_round_adds_too_little(agent, conn):
@@ -107,6 +145,65 @@ def test_coverage_check_failure_stops_with_reason(agent, conn):
     r = agent.full(FakeLLM(conn, Coverage=lambda c: RuntimeError("bad json")), FakeSearch())
     assert r["task"]["stop_reason"] == "coverage_check_failed"
     assert r["task"]["status"] == "done"  # still writes from the notes it has
+
+
+# --- citation ids ------------------------------------------------------------------
+
+def _cite_notes(style):
+    """Writer that cites note numbers (the live-run bug) instead of evidence numbers."""
+    def draft(call):
+        from conftest import NUM_SENTENCE
+        notes = [n for n in notes_with_numbers(call.llm.conn) if NUM_SENTENCE in str(n["details"])][:2]
+        ref = (lambda n: f"N{n['id']}") if style == "N" else (lambda n: n["id"])
+        return {"sufficient": True, "bottom_line": {"text": "b", "confidence": "moderate", "reason": "r"},
+                "items": [{"text": GOOD_TEXT, "claim_type": "fact", "evidence_ids": [ref(n)],
+                           "evidence_level": "phase 3 randomized trial",
+                           "numbers": [{"value": v, "sentence": NUM_SENTENCE, "evidence_id": ref(n)}
+                                       for v in ("23.7", "16.6", "0.70")]} for n in notes]}
+    return draft
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("style", ["N", "bare"])
+def test_note_numbers_cited_as_evidence_are_mapped(agent, conn, style):
+    # 4 domains -> 2 hits per query are dropped (not selected) first, so low evidence ids are dropped pages,
+    # exactly like the live run where the writer's note numbers collided with them.
+    search = FakeSearch(domains=("fda.gov", "nejm.org", "nature.com", "ascopubs.org"))
+    r = agent.full(FakeLLM(conn, Draft=_cite_notes(style)), search)
+    claims = r["claims"]
+    assert claims and r["task"]["status"] == "done"
+    kept = {e["id"] for e in r["evidence"] if e["kept"]}
+    for c in claims:
+        assert {x["evidence_id"] for x in c["citations"]} <= kept
+        assert all(x["verdict"] == "supported" for x in c["citations"])
+        assert c["citations"][0]["source_sentence"]
+    assert any("mapped N" in t["message"] for t in trace_steps(r, "write"))
+
+
+def test_repair_accepts_numbers_without_value(agent, conn):
+    """Live bug: the model omitted a number's "value"; repair failed validation and claims stayed flagged."""
+    def verify(call):
+        from conftest import blocks
+        ok = "(revised)" in call.user
+        return {"verdicts": [{"evidence_id": e, "verdict": "supported" if ok else "partial", "note": "n"}
+                             for e, _ in blocks(call.user)]}
+
+    def repair(call):
+        from conftest import h_repair
+        out = h_repair(call)
+        for c in out["claims"]:
+            for n in c["numbers"]:
+                n.pop("value")  # sentence + evidence id only
+            c["numbers"][0]["value"] = 0.7  # and one bare number instead of a string
+        return out
+
+    r = agent.full(FakeLLM(conn, ClaimVerification=verify, Repair=repair), FakeSearch())
+    assert not [t for t in trace_steps(r, "repair") if t["level"] == "error"]
+    claims = [c for c in r["claims"] if c["section"] == "new"]
+    assert claims and all(c["revised"] for c in claims)
+    assert all(x["verdict"] == "supported" and x["source_sentence"] for c in claims for x in c["citations"])
 
 
 # --- repair loop -----------------------------------------------------------------

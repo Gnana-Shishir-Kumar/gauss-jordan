@@ -117,6 +117,11 @@ def main(argv: list[str] | None = None) -> int:
             if input("\nStart research? [y/N] ").strip().lower() not in ("y", "yes"):
                 print(f"Not started. Approve later with: research --run {task_id}", file=sys.stderr)
                 return 5
+    if args.run is None:
+        # prepare() ran in its own event loop; its clients' pooled connections are tied to that closed loop,
+        # so the research run gets fresh clients (reusing them fails with "Event loop is closed").
+        llm, search = default_clients(settings)
+        kw.update(llm=llm, search=search)
     try:
         report = asyncio.run(run(task_id, **kw))
     except ValueError as exc:
