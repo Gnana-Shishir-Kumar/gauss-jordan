@@ -134,6 +134,15 @@ def _value_str(v: Any) -> str:
     return "" if v is None else str(v)
 
 
+def _usable_numbers(v: Any, need: tuple[str, ...]) -> list:
+    """Drop number entries missing a required field instead of failing the whole response. A number without its
+    source sentence can't be checked anyway: if it stays in the claim text, the deterministic number check fails it."""
+    if not isinstance(v, list):
+        return []
+    return [n for n in v if not isinstance(n, dict)
+            or all(n.get(k) not in (None, "") and (k != "sentence" or str(n[k]).strip()) for k in need)]
+
+
 class NoteNumber(BaseModel):
     value: str = ""
     sentence: str
@@ -157,6 +166,11 @@ class Note(BaseModel):
     @classmethod
     def check_ids(cls, v: Any) -> list[int]:
         return _ids(v)
+
+    @field_validator("numbers", mode="before")
+    @classmethod
+    def _numbers(cls, v: Any) -> list:
+        return _usable_numbers(v, ("sentence",))
 
     @field_validator("date", mode="before")
     @classmethod
@@ -257,6 +271,11 @@ class Item(BaseModel):
     @classmethod
     def check_ids(cls, v: Any) -> list[int]:
         return _ids(v)
+
+    @field_validator("numbers", mode="before")
+    @classmethod
+    def _numbers(cls, v: Any) -> list:
+        return _usable_numbers(v, ("sentence", "evidence_id"))
 
     @field_validator("date", mode="before")
     @classmethod

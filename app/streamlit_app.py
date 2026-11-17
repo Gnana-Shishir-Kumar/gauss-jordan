@@ -260,6 +260,9 @@ def main() -> None:
                                 placeholder="e.g. What has changed for first-line EGFR-mutant metastatic NSCLC "
                                             "since the 2024 ESMO guideline update?")
         st.caption(f":material/lock: {NO_IDENTIFIERS}")
+        auto_start = st.checkbox("Start research automatically", value=False,
+                                 help="Skip the plan review and start searching as soon as the plan is ready. "
+                                      "Clarifying questions still stop the run.")
         submitted = st.form_submit_button("Prepare brief", type="primary", icon=":material/edit_note:")
 
     if submitted and question.strip():
@@ -280,6 +283,9 @@ def main() -> None:
                 st.error(str(exc))
                 return
         st.session_state.task_id = report["task"]["id"]
+        if auto_start and report["task"]["status"] == "awaiting_approval":
+            st.session_state.started = report["task"]["id"]
+            _run_in_background(report["task"]["id"], settings)
 
     task_id = st.session_state.get("task_id")
     task = storage.get_task(conn, task_id) if task_id else None

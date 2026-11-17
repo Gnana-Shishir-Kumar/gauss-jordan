@@ -146,7 +146,28 @@ Severity ratings: **High** means it can make the brief wrong or misleading. **Me
 - Pydantic validation with one repair attempt and safe fallbacks
 - a non-root Docker image with no baked-in keys
 
-## 8. Recommended next steps (in order)
+## 8. External feedback: a biologist's review (2026-11-16)
+
+A research biologist reviewed the project. Their points, paraphrased:
+- Scientists go to the source and read the experiment design, details and graphs closely, so an AI agent checking an AI summary may not add much. Physicians might like it; they are not convinced scientists need it.
+- For news, people can already write code to get a newsfeed. What makes this agent better?
+
+How each point maps to this audit:
+
+| Objection | What answers it | What currently undercuts the answer |
+|---|---|---|
+| "We read the source, design and graphs ourselves" | The target user is a clinician, not a bench scientist (section 1). The brief is triage: it says which sources changed since the anchor date and quotes the exact sentence behind every number, so the reader reaches the paper faster. | Tavily `extract` is text only, so figures, image tables and supplements are never read, and this limit isn't documented. Items record evidence level and population, but not sample size, comparator arm, primary endpoint or follow-up. |
+| "AI checking AI isn't useful" | The main safety claim is the **deterministic** checks (section 4): numbers must appear verbatim in the cited sentence, and design and population words are matched against the excerpt. The LLM verifier is a second layer. | Findings **1** (best-of verdict), **4** (range and CI upper bounds unchecked), **5** (very short source sentences accepted) and **6** (negation ignored) are holes in exactly these guarantees. All four are fixed on `fix/verification-checks`. |
+| "Why not a newsfeed?" | Anchor-date filtering, the tier allowlist, counting independent sources, PRELIMINARY vs peer-reviewed labels, the "Sources disagree" section, and a verbatim sentence beside every number. | Finding **3** (items dated before the anchor can appear as new) breaks the main thing that separates this from a feed, and **11** (many items undated) weakens it further. The evals have never run (**13**), so there is no measured comparison against a simple baseline. |
+
+What to do about it (folded into section 9):
+- Merge `fix/verification-checks` first. It closes 1, 3, 4, 5 and 6, which are the specific weak points this reviewer raised.
+- Add a quality baseline next to the credit comparison. Run the 15 eval questions through a plain date-filtered search (news or PubMed) and compare known developments found, items wrongly labelled new, and number errors.
+- State in the README use limits that figures, image tables and supplements are not read.
+- Consider extracting design details per item: sample size, comparator, primary endpoint and follow-up. This is a prompt and schema change, so bump `PROMPT_VERSION`.
+- In the pitch, lead with the deterministic checks and present the LLM verifier as secondary.
+
+## 9. Recommended next steps (in order)
 
 1. **Bring in `fix/verification-checks`:** rebase it onto `main`, resolve the 3 conflicts as described in section 6, and use a new `PROMPT_VERSION`. That closes findings 1–7 and 13.
 2. **Fix 8–10:**
@@ -154,10 +175,14 @@ Severity ratings: **High** means it can make the brief wrong or misleading. **Me
    - on startup, mark tasks stuck in a running status for over N minutes as `failed` with an error, and show this in the UI
    - stop starting new rounds or steps when the time budget is spent, and document that the budget is approximate
 3. **Run the live smoke test**, then `uv run python evals/run_evals.py` (about 165–200 credits and 2 hours), then `uv run python evals/compare.py --set-baseline`.
-4. **Add a GitHub Actions workflow** that runs `uv run pytest`.
-5. **Pre-run the demo questions** into `research.db`, then deploy to a Nebius CPU VM with `docker compose up -d --build` (see README "Deploy to the cloud").
+4. **Answer the reviewer feedback (section 8):**
+   - run the same 15 questions through a plain date-filtered search baseline and compare quality, not only credits
+   - add "figures, image tables and supplements are not read" to the README use limits
+   - optionally extract per-item design details (sample size, comparator, primary endpoint, follow-up), with a new `PROMPT_VERSION`
+5. **Add a GitHub Actions workflow** that runs `uv run pytest`.
+6. **Pre-run the demo questions** into `research.db`, then deploy to a Nebius CPU VM with `docker compose up -d --build` (see README "Deploy to the cloud").
 
-## 9. Commands
+## 10. Commands
 
 ```bash
 uv sync

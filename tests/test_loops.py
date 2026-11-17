@@ -206,6 +206,40 @@ def test_repair_accepts_numbers_without_value(agent, conn):
     assert all(x["verdict"] == "supported" and x["source_sentence"] for c in claims for x in c["citations"])
 
 
+def test_incomplete_number_entries_are_dropped_not_fatal():
+    """Live bug: repair returned a number without its sentence; validation failed and claims stayed flagged."""
+    from research_agent.schemas import Note, Repair
+
+    r = Repair.model_validate({"claims": [{"claim_id": 1, "text": "HR 0.70", "evidence_ids": ["E3"], "numbers": [
+        {"value": "0.70", "evidence_id": "E3"},                  # no sentence -> dropped
+        {"value": "0.70", "sentence": "  ", "evidence_id": 3},   # blank sentence -> dropped
+        {"value": "0.70", "sentence": "HR was 0.70 overall."},   # no evidence id -> dropped
+        {"value": "0.70", "sentence": "HR was 0.70 overall.", "evidence_id": "E3"},
+    ]}]})
+    assert [(n.sentence, n.evidence_id) for n in r.claims[0].numbers] == [("HR was 0.70 overall.", 3)]
+    note = Note.model_validate({"text": "t", "evidence_ids": [3], "numbers": [{"value": "1"}, {"sentence": "s s s s"}]})
+    assert [n.sentence for n in note.numbers] == ["s s s s"]
+
+
+def test_repair_survives_numbers_without_sentence(agent, conn):
+    def verify(call):
+        from conftest import blocks
+        ok = "(revised)" in call.user
+        return {"verdicts": [{"evidence_id": e, "verdict": "supported" if ok else "partial", "note": "n"}
+                             for e, _ in blocks(call.user)]}
+
+    def repair(call):
+        from conftest import h_repair
+        out = h_repair(call)
+        for c in out["claims"]:
+            c["numbers"].append({"value": "0.70", "evidence_id": c["evidence_ids"][0]})  # sentence missing
+        return out
+
+    r = agent.full(FakeLLM(conn, ClaimVerification=verify, Repair=repair), FakeSearch())
+    assert not [t for t in trace_steps(r, "repair") if t["level"] == "error"]
+    assert all(c["revised"] for c in r["claims"] if c["section"] == "new")
+
+
 # --- repair loop -----------------------------------------------------------------
 
 def verify_unless_revised(call):
