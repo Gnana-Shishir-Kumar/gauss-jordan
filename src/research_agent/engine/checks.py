@@ -1,7 +1,6 @@
 """Deterministic checks that run before (and independently of) the LLM verifier.
 
-- Numbers: every number in a claim must appear in its stored verbatim source sentence, and that sentence must
-  appear in the cited excerpt (as whole words, not inside a longer number or word).
+- Numbers: see engine/numbers.py (verifier gate 1). numbers_in / number_tokens here delegate to it.
 - Design: a phase/design word in an evidence level must be stated (not negated) in a cited excerpt, else "not stated".
 - Population: must come from a note whose population sentence was verified in the excerpt, else
   "population not stated". A negated term ("without brain metastases", "non-small cell") never matches.
@@ -11,21 +10,13 @@
 from __future__ import annotations
 
 import re
-from decimal import Decimal, InvalidOperation
 
 from ..evidence import terms
+from . import numbers as _numbers
 
 POPULATION_NOT_STATED = "population not stated"
 LEVEL_NOT_STATED = "not stated"
-MIN_SENTENCE_WORDS = 4  # a "source sentence" shorter than this is a fragment, not a sentence
 
-# Numbers not glued to letters (HER2, G12C, CDK4/6, PD-1 are names, not numbers). A hyphen after a letter is part
-# of a name (PD-1, COVID-19); a hyphen after a digit is a range (30-40%, 0.58-0.85), so both ends are numbers.
-_NUM_RE = re.compile(r"(?<![A-Za-z0-9/.])(?<![A-Za-z]-)(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?(?![A-Za-z0-9/])")
-# ISO dates (2025-06-01, 2025-06): only the year is checked as a number.
-_ISO_DATE_RE = re.compile(r"\b(\d{4})(-\d{1,2}(?:-\d{1,2})?)\b")
-# Numbers that are part of a name rather than a result.
-_NAME_NUM_RE = re.compile(r"\b(?:phase|exon|codon|stage|grade|line)\s+(?:\d+[a-z]?(?:/\d+)?|[ivx]+[ab]?)\b", re.I)
 _ROMAN = {"i": "1", "ii": "2", "iii": "3", "iv": "4", "ib": "1b", "ia": "1a", "iia": "2a", "iib": "2b"}
 _DESIGN_WORDS = (
     "randomized", "randomised", "single-arm", "single arm", "open-label", "double-blind", "placebo-controlled",
@@ -71,54 +62,13 @@ def contains(haystack: str, needle: str) -> bool:
     return False
 
 
-def is_sentence(s: str) -> bool:
-    return len((s or "").split()) >= MIN_SENTENCE_WORDS
-
-
-def _norm_number(whole: str, frac: str | None) -> str:
-    raw = whole.replace(",", "") + (frac or "")
-    try:
-        d = Decimal(raw).normalize()
-    except InvalidOperation:
-        return raw
-    s = format(d, "f")
-    return s.rstrip("0").rstrip(".") if "." in s else s
-
-
 def number_tokens(text: str) -> list[tuple[str, str]]:
-    """(as written, normalized) for each result-like number in text."""
-    blank = lambda m: " " * len(m.group(0))  # noqa: E731 - keep offsets so "as written" stays accurate
-    cleaned = _NAME_NUM_RE.sub(blank, text or "")
-    cleaned = _ISO_DATE_RE.sub(lambda m: m.group(1) + " " * len(m.group(2)), cleaned)
-    return [(m.group(0), _norm_number(m.group(1), m.group(2))) for m in _NUM_RE.finditer(cleaned)]
+    """(as written, normalized) for each checkable quantity in text (see engine/numbers.py)."""
+    return [(q.raw, q.value) for q in _numbers.quantities(text)]
 
 
 def numbers_in(text: str) -> set[str]:
-    return {norm for _, norm in number_tokens(text)}
-
-
-def check_numbers(claim_text: str, citations: list[dict]) -> tuple[bool, list[str]]:
-    """citations: dicts with evidence_id, excerpt, source_sentence (newline-separated sentences).
-
-    Returns (passed, problems). Claims without numbers pass trivially."""
-    wanted = numbers_in(claim_text)
-    if not wanted:
-        return True, []
-    problems: list[str] = []
-    covered: set[str] = set()
-    for c in citations:
-        for sentence in filter(None, (c.get("source_sentence") or "").split("\n")):
-            if not is_sentence(sentence):
-                problems.append(f"source sentence for E{c['evidence_id']} is a fragment, not a sentence")
-                continue
-            if not contains(c.get("excerpt") or "", sentence):
-                problems.append(f"source sentence for E{c['evidence_id']} is not in the excerpt")
-                continue
-            covered |= numbers_in(sentence)
-    missing = sorted(wanted - covered)
-    if missing:
-        problems.append("number(s) " + ", ".join(missing) + " not found in a verified source sentence")
-    return not missing, problems
+    return _numbers.numbers_in(text)
 
 
 def _phases(text: str) -> set[str]:

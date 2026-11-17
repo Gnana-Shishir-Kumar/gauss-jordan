@@ -27,6 +27,7 @@ class LLMResult(Generic[T]):
     latency_ms: int = 0
     attempts: int = 1
     model: str = ""
+    cached_tokens: int | None = None  # cached input tokens, when the API reports them
 
 
 class LLMClient(Protocol):
@@ -110,6 +111,7 @@ class TokenFactoryLLM:
     ) -> LLMResult[T]:
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         in_tok = out_tok = 0
+        cached: int | None = None
         start = time.perf_counter()
         last: ValidationError | None = None
         truncated = False
@@ -118,6 +120,10 @@ class TokenFactoryLLM:
             usage = getattr(resp, "usage", None)
             in_tok += int(getattr(usage, "prompt_tokens", 0) or 0)
             out_tok += int(getattr(usage, "completion_tokens", 0) or 0)
+            details = getattr(usage, "prompt_tokens_details", None)
+            ct = getattr(details, "cached_tokens", None) if details is not None else None
+            if ct is not None:
+                cached = (cached or 0) + int(ct)
             choice = resp.choices[0] if getattr(resp, "choices", None) else None
             text = (choice.message.content or "") if choice else ""
             truncated = getattr(choice, "finish_reason", None) == "length"
@@ -126,6 +132,7 @@ class TokenFactoryLLM:
                 return LLMResult(
                     data=data, input_tokens=in_tok, output_tokens=out_tok,
                     latency_ms=int((time.perf_counter() - start) * 1000), attempts=attempt, model=model,
+                    cached_tokens=cached,
                 )
             except ValidationError as exc:
                 last = exc

@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "openai>=1.40",
+    "httpx>=0.27",  # already installed via openai/tavily-python; declared because we call PubMed, CT.gov, Crossref directly
     "tavily-python>=0.5",
     "pydantic>=2.6",
     "streamlit>=1.35",

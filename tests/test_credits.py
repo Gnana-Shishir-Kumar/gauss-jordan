@@ -19,9 +19,9 @@ def test_compare_on_a_run(agent, conn):
     assert s["searches"] == 3 and s["raw_results"] == 12 and s["unique_results"] == 12
     assert s["extracted_urls"] == 6  # top 2 per query
     project, batched, per_page, advanced = res["rows"]
-    assert project["total"] == r["totals"]["credits"] == 3 + 2
-    assert batched["total"] == 3 + 3 and per_page["total"] == 3 + 12 and advanced["total"] == 6 + 12
-    assert per_page["vs_project"] == 3.0
+    assert project["total"] == r["totals"]["credits"] == 6 + 2  # 3 advanced searches + one batch of 6 pages
+    assert batched["total"] == 6 + 3 and per_page["total"] == 6 + 12 and advanced["total"] == 6 + 12
+    assert per_page["vs_project"] == 2.2
     assert res["repeat_within_cache"]["project"] == 0
     assert "| This project (billed)" in to_markdown(res)
 
@@ -32,4 +32,4 @@ def test_cached_rerun_still_priced_for_traditional(agent, conn):
     second = agent.full(FakeLLM(conn), search)  # served from cache
     res = compare(second)
     assert res["rows"][0]["total"] == 0
-    assert res["stats"]["raw_results"] == 6 and res["rows"][2]["total"] == 3 + 6
+    assert res["stats"]["raw_results"] == 6 and res["rows"][2]["total"] == 6 + 6

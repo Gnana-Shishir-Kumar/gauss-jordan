@@ -10,7 +10,7 @@ import pytest
 from research_agent import storage
 from research_agent.config import get_settings
 from research_agent.engine import run_all
-from research_agent.engine.orchestrator import default_clients
+from research_agent.engine.orchestrator import STOP_REASONS, default_clients
 
 settings = get_settings()
 pytestmark = [
@@ -27,7 +27,8 @@ def test_live_end_to_end(tmp_path):
         "since 2024-06-01?", llm=llm, search=search, conn=conn, settings=settings))
     task = report["task"]
     assert task["status"] in ("done", "insufficient_evidence"), task["error"]
-    assert task["stop_reason"] and report["sub_queries"] and report["evidence"]
+    assert task["stop_reason"] in STOP_REASONS and report["sub_queries"] and report["evidence"]
     assert all(e["trust_tier"] in (1, 2, 3, None) for e in report["evidence"])
-    assert all(x["verdict"] for c in report["claims"] for x in c["citations"])
+    assert all(c["verdict"] for c in report["claims"] if c["status"] != "deleted")
+    assert all(x["sentences"] for c in report["claims"] for x in c["citations"])
     assert report["totals"]["credits"] > 0

@@ -30,9 +30,12 @@ def test_missing_keys():
 def test_limits_defaults():
     s = Settings()
     assert s.limits.max_queries_per_round == 5
-    assert s.limits.max_rounds == 2 and s.limits.max_repair_passes == 1
+    assert s.limits.max_research_rounds == 4 and s.limits.max_repair_rounds == 2
+    assert s.limits.round1_depth == "advanced" and s.limits.chunks_per_source == 3 and s.limits.max_concurrency == 5
     assert s.limits.max_follow_ups_per_aspect == 1
-    assert s.network.llm_max_tokens == 16384 and s.network.llm_timeout_s == 300
+    assert s.network.llm_max_tokens == 16384 and s.network.llm_timeout_s == 480
     assert s.limits.search_results == 10 and s.limits.extract_batch_size == 20
     assert s.limits.round1_tiers == (1, 2) and 3 in s.limits.follow_up_tiers
-    assert s.budget.credits > 0 and s.budget.time_s > 0 and s.cache_ttl_days == 7
+    assert s.budget.tavily_calls == 40 and s.budget.tavily_repair_reserve == 8
+    assert min(s.budget.pubmed_calls, s.budget.ctgov_calls, s.budget.openfda_calls, s.budget.crossref_calls) > 0
+    assert s.budget.time_s > 0 and s.cache_ttl_days == 7

@@ -1,13 +1,13 @@
 """Regression tests for the verification, date, number-check and cache fixes (review of the v2 pipeline)."""
 
-import re
 from dataclasses import replace
 
-from conftest import NUM_SENTENCE, FakeLLM, FakeSearch, blocks, good_item, notes_with_numbers, trace_steps
+from conftest import FakeLLM, FakeSearch, trace_steps
 
 from research_agent.backends import cache
+from research_agent.engine import numbers
 from research_agent.engine.checks import (POPULATION_NOT_STATED, before_anchor, check_design, check_item_date,
-                                          check_numbers, check_population, contains, numbers_in, population_supported)
+                                          check_population, contains, numbers_in, population_supported)
 from research_agent.evidence import near_duplicate, normalize_query, site_of
 from research_agent.metrics import task_counts
 from research_agent.render import claim_verdict, is_flagged
@@ -15,68 +15,24 @@ from research_agent.render import claim_verdict, is_flagged
 # --- verdict rollup ------------------------------------------------------------------
 
 
-def _claim(*verdicts):
-    return {"citations": [{"evidence_id": i, "verdict": v} for i, v in enumerate(verdicts, 1)]}
-
-
-def test_claim_verdict_is_worst_checked_citation():
-    assert claim_verdict(_claim("supported", "unsupported")) == "unsupported"
-    assert claim_verdict(_claim("supported", "partial")) == "partial"
-    assert claim_verdict(_claim("supported", "source_unavailable")) == "supported"  # login wall ignored
-    assert claim_verdict(_claim("source_unavailable")) == "source_unavailable"
+def test_claim_verdict_comes_from_the_verifier():
+    assert claim_verdict({"verdict": "partial", "citations": [{"verdict": "supported"}]}) == "partial"
+    assert claim_verdict({"verdict": "rejected", "citations": []}) == "rejected"
     assert claim_verdict({"citations": []}) == "uncited"
+    assert claim_verdict({"citations": [{"evidence_id": 1}]}) == "unchecked"
 
 
-def test_partial_is_flagged_not_verified():
-    assert is_flagged(_claim("partial"))
-    assert is_flagged(_claim("supported", "unsupported"))
-    assert not is_flagged(_claim("supported", "supported"))
-
-
-def _two_source_draft(call):
-    notes = [n for n in notes_with_numbers(call.llm.conn) if NUM_SENTENCE in str(n["details"])]
-    item = good_item(notes[0])
-    item["evidence_ids"] = [notes[0]["evidence_ids"][0], notes[1]["evidence_ids"][0]]
-    return {"sufficient": True, "bottom_line": {"text": "Drugx improved PFS.", "confidence": "high", "reason": "r"},
-            "items": [item]}
-
-
-def _second_source_disagrees(call):
-    ids = sorted(e for e, _ in blocks(call.user))
-    return {"verdicts": [{"evidence_id": e, "verdict": "supported" if e == ids[0] or len(ids) == 1 else "unsupported",
-                          "note": "n"} for e in ids]}
-
-
-def test_mixed_verdict_claim_goes_to_repair_and_is_fixed(agent, conn):
-    llm = FakeLLM(conn, Draft=_two_source_draft, ClaimVerification=_second_source_disagrees)
-    r = agent.full(llm, FakeSearch())
-    assert llm.count("Repair") == 1  # one supported citation no longer hides an unsupported one
-    claim = r["claims"][0]
-    assert claim["revised"] and len(claim["citations"]) == 1 and claim_verdict(claim) == "supported"
-    assert r["task"]["status"] == "done"
-
-
-def test_mixed_verdict_claim_stays_flagged_when_repair_keeps_bad_citation(agent, conn):
-    def keep_both(call):
-        draft = _two_source_draft(call)["items"][0]
-        ids = [int(x) for x in re.findall(r"^claim_id (\d+):", call.user, re.M)]
-        return {"claims": [{**draft, "claim_id": i} for i in ids]}
-
-    llm = FakeLLM(conn, Draft=_two_source_draft, ClaimVerification=_second_source_disagrees, Repair=keep_both)
-    r = agent.full(llm, FakeSearch())
-    assert "[FLAGGED: not verified]" in r["task"]["final_answer"]
-    assert r["task"]["status"] == "insufficient_evidence"
-    assert r["task"]["answer_json"]["bottom_line"] is None
+def test_partial_and_unverified_are_flagged():
+    assert is_flagged({"verdict": "partial", "citations": [{}]})
+    assert is_flagged({"verdict": "supported", "status": "unverified", "citations": [{}]})
+    assert not is_flagged({"verdict": "supported", "citations": [{}]})
 
 
 def test_partial_after_repair_is_not_done(agent, conn):
-    def partial(call):
-        return {"verdicts": [{"evidence_id": e, "verdict": "partial", "note": "different population"}
-                             for e, _ in blocks(call.user)]}
-
-    r = agent.full(FakeLLM(conn, ClaimVerification=partial), FakeSearch())
+    partial = lambda call: {"verdict": "partial", "note": "different population"}  # noqa: E731
+    r = agent.full(FakeLLM(conn, Entailment=partial), FakeSearch())
     assert r["task"]["status"] == "insufficient_evidence"
-    assert "[FLAGGED: not verified]" in r["task"]["final_answer"]
+    assert "[UNVERIFIED]" in r["task"]["final_answer"]
 
 
 # --- bottom line ---------------------------------------------------------------------
@@ -167,20 +123,14 @@ def test_date_helpers():
 def test_range_and_ci_upper_bounds_are_checked():
     assert numbers_in("ORR 30-40% (95% CI 0.58-0.85)") == {"30", "40", "95", "0.58", "0.85"}
     assert numbers_in("PD-1, PD-L1, COVID-19, HER2-low, CDK4/6") == set()
-    assert numbers_in("approved on 2025-06-01") == {"2025"}
-    cit = [{"evidence_id": 1, "excerpt": "The ORR was 30-45% across cohorts.",
-            "source_sentence": "The ORR was 30-45% across cohorts."}]
-    ok, problems = check_numbers("ORR was 30-40%", cit)
-    assert not ok and "40" in problems[-1]
+    assert numbers_in("approved on 2025-06-01") == {"2025-06-01"}
+    bad = numbers.check("ORR was 30-40%", ["The ORR was 30-45% across cohorts."])
+    assert bad.status == "fail" and "40" in bad.problems[-1]
 
 
 def test_number_must_match_whole_number_and_full_sentence():
     assert not contains("ORR was 45%", "5%")
-    cit = [{"evidence_id": 1, "excerpt": "ORR was 45% overall.", "source_sentence": "5%"}]
-    assert not check_numbers("ORR was 5%", cit)[0]
-    cit = [{"evidence_id": 1, "excerpt": "Overall the ORR was 45% in this trial.",
-            "source_sentence": "ORR was 5% in this trial"}]
-    assert not check_numbers("ORR was 5%", cit)[0]
+    assert numbers.check("ORR was 5%", ["ORR was 45% overall."]).status == "fail"
 
 
 def test_design_ignores_negated_words():
@@ -236,3 +186,11 @@ def test_failed_run_is_not_counted_as_correct():
     assert task_counts(report, expect_insufficient=False)["insufficient_correct"] == 0
     report["task"]["status"] = "done"
     assert task_counts(report, expect_insufficient=False)["insufficient_correct"] == 1
+
+
+def test_bottom_line_may_state_the_anchor_date():
+    """Live bug: 'since June 2024' was rejected as an unverified number, forcing a plain bottom line."""
+    from research_agent.engine.writer import unverified_numbers
+    allowed = {"2024-06-01", "23.7", "2025-06-01"}
+    assert unverified_numbers("Since June 2024, PFS reached 23.7 months (June 2025).", allowed) == []
+    assert unverified_numbers("Since 2023, PFS reached 24 months.", allowed) == ["2023", "24"]

@@ -15,27 +15,47 @@ USE_LIMITS = (
 )
 NO_IDENTIFIERS = "Do not enter patient identifiers (names, record numbers, dates of birth). Ask about the clinical topic."
 
-# Only "supported" counts as verified. "partial" means different numbers, dates or populations, so it is flagged.
+# Only "supported" counts as verified. "partial" means a different endpoint, arm, number or population: flagged.
 SUPPORTING = ("supported",)
-_SEVERITY = {"supported": 0, "partial": 1, "unsupported": 2}
+GATE_LABELS = {"number_gate": "numbers", "id_gate": "identifiers", "entail_gate": "entailment"}
 
 
 def claim_verdict(claim: dict) -> str:
-    """Overall verdict for a claim: the WORST verdict among its checked citations, so one supporting source can't
-    hide a source that contradicts or doesn't state the claim. source_unavailable citations (login walls) are
-    ignored when another citation was checked."""
-    cits = claim.get("citations", [])
-    if not cits:
-        return "uncited"
-    verdicts = [c.get("verdict") for c in cits]
-    checked = [v for v in verdicts if v in _SEVERITY]
-    if checked:
-        return max(checked, key=_SEVERITY.__getitem__)
-    return "source_unavailable" if "source_unavailable" in verdicts else "unverified"
+    """Overall verdict: rejected (citation check), unsupported (number or identifier gate, or entailment), partial,
+    supported. Set once per claim by the verifier over all cited sentences together."""
+    if claim.get("verdict"):
+        return claim["verdict"]
+    return "uncited" if not claim.get("citations") else "unchecked"
 
 
 def is_flagged(claim: dict) -> bool:
-    return claim_verdict(claim) not in SUPPORTING
+    return claim_verdict(claim) not in SUPPORTING or claim.get("status") == "unverified"
+
+
+def gate_summary(claim: dict) -> str:
+    """'numbers pass · identifiers n/a · entailment supported' (the failing gate is the first non-pass one)."""
+    if claim.get("rejected"):
+        return "citation check failed (" + "; ".join(f"{r['id'] or '-'}: {r['reason']}" for r in claim["rejected"]) + ")"
+    cits = claim.get("citations") or []
+    parts = []
+    for g, label in GATE_LABELS.items():
+        statuses = [(x.get(g) or {}).get("status") for x in cits if x.get(g)]
+        if not statuses:
+            continue
+        st = statuses[0] if g != "id_gate" else (next((x for x in statuses if x == "fail"), statuses[0]))
+        parts.append(f"{label} {st}")
+    return " · ".join(parts) or "not checked"
+
+
+def failed_gate(claim: dict) -> str | None:
+    if claim.get("rejected"):
+        return "citation"
+    for g, label in GATE_LABELS.items():
+        for x in claim.get("citations") or []:
+            st = (x.get(g) or {}).get("status")
+            if st in ("fail", "partial", "unsupported"):
+                return label
+    return None
 
 
 def evidence_label(claim: dict) -> str:
@@ -53,9 +73,9 @@ def evidence_label(claim: dict) -> str:
         "No verified source"
 
 
-def key_numbers(claim: dict) -> list[tuple[str, int]]:
-    return [(s, c["evidence_id"]) for c in claim.get("citations", [])
-            for s in (c.get("source_sentence") or "").split("\n") if s.strip()]
+def cited_sentences(claim: dict) -> list[tuple[str, str]]:
+    """(sentence ID, verbatim sentence) for every cited sentence, from the evidence store."""
+    return [(s["id"], s["text"]) for c in claim.get("citations", []) for s in c.get("sentences", [])]
 
 
 def sort_items(claims: list[dict]) -> list[dict]:
@@ -67,7 +87,7 @@ def _item_lines(n: int, c: dict, anchor: str | None = None) -> list[str]:
     types = sorted({type_label(x.get("source_type")) for x in cits}) or ["no source"]
     tiers = sorted({x.get("trust_tier") for x in cits if x.get("trust_tier")})
     verdict = claim_verdict(c)
-    flag = "  [FLAGGED: not verified]" if is_flagged(c) else ""
+    flag = "  [UNVERIFIED]" if c.get("status") == "unverified" else "  [FLAGGED: not verified]" if is_flagged(c) else ""
     from .engine.checks import before_anchor  # local import: engine imports this module
     if before_anchor(c.get("item_date"), anchor):
         flag += f"  [DATED BEFORE {anchor}: not new]"
@@ -75,11 +95,12 @@ def _item_lines(n: int, c: dict, anchor: str | None = None) -> list[str]:
              f"{', '.join(tier_label(t).split(' · ')[0] for t in tiers) or 'no tier'}{flag}",
              f"   What changed: {c['text']}  [{c['claim_type']}; {verdict.replace('_', ' ')}]",
              f"   Evidence level: {c.get('evidence_level') or 'not stated'} · {evidence_label(c)}",
-             f"   Population: {c.get('population') or 'population not stated'}"]
-    nums = key_numbers(c)
-    if nums:
-        lines.append("   Key numbers (source sentences):")
-        lines += [f'     E{eid}: "{s}"' for s, eid in nums]
+             f"   Population: {c.get('population') or 'population not stated'}",
+             f"   Checks: {gate_summary(c)}"]
+    sents = cited_sentences(c)
+    if sents:
+        lines.append("   Cited sentences (verbatim):")
+        lines += [f'     {sid}: "{t}"' for sid, t in sents]
     for x in cits:
         lines.append(f"   Source E{x['evidence_id']}: {x.get('url') or '?'} ({(x.get('verdict') or 'unchecked').replace('_', ' ')})")
     return lines
@@ -99,6 +120,8 @@ def format_answer(task: dict, claims: list[dict], answer: dict) -> str:
         out.append(f"{bl['text']} (confidence: {bl['confidence']}; {bl.get('reason', '')})".rstrip())
     else:
         out.append("No bottom line: the evidence found was insufficient.")
+    removed = [c for c in claims if c.get("status") == "deleted"]
+    claims = [c for c in claims if c.get("status") != "deleted"]
     new = sort_items([c for c in claims if c.get("section") == "new"])
     out += ["", f"2. WHAT'S NEW SINCE {anchor} (newest first)"]
     if not new:
@@ -110,6 +133,9 @@ def format_answer(task: dict, claims: list[dict], answer: dict) -> str:
     out += [line for i, c in enumerate(conflicts, 1) for line in _item_lines(i, c, task.get("anchor_date"))] or ["No conflicts found."]
     out += ["", "4. NOT YET ESTABLISHED"] + [f"- {x}" for x in answer.get("not_established") or ["(none listed)"]]
     out += ["", "5. CHECK BEFORE ACTING"] + [f"- {x}" for x in answer.get("check_before_acting") or ["(none listed)"]]
+    if removed:
+        out += ["", f"Removed during verification: {len(removed)} claim(s) whose numbers or citations could not be "
+                "sourced from stored evidence (see the trace)."]
     out += ["", "6. " + DISCLAIMER, USE_LIMITS]
     return "\n".join(out).strip()
 
@@ -130,10 +156,24 @@ def format_report(report: dict, show_trace: bool = True) -> str:
     if task.get("final_answer"):
         out += ["", "UPDATE BRIEF", "------------", task["final_answer"]]
     totals = report.get("totals", {})
+    usage = task.get("usage") or {}
+    used = (usage.get("used") or {}) if isinstance(usage, dict) else {}
     out += ["", f"Stop reason: {task.get('stop_reason') or '-'}",
             f"Tavily credits: {totals.get('credits', 0):g} · tokens: {totals.get('input_tokens', 0)} in / "
-            f"{totals.get('output_tokens', 0)} out",
+            f"{totals.get('output_tokens', 0)} out" + (f" ({totals['cached_tokens']} cached)"
+                                                       if totals.get("cached_tokens") else ""),
+            "Calls: " + (", ".join(f"{k} {v}" for k, v in used.items() if v) or "-")
+            + (f" (Tavily repair reserve used: {usage.get('tavily_repair_used', 0)}/"
+               f"{usage.get('tavily_repair_reserve', 0)})" if used else ""),
             f"Models: {task.get('model_ids')} · prompt version: {task.get('prompt_version')}"]
+    steps = report.get("steps") or []
+    if steps:
+        out += ["", "COST BY STEP", "------------",
+                f"  {'step':<9} {'calls':>5} {'in tok':>8} {'out tok':>8} {'cached':>7} {'credits':>7} {'sec':>7}"]
+        for st in steps:
+            cached = f"{st['cached_share']:.0%}" if st.get("cached_share") is not None else "n/r"
+            out.append(f"  {st['step']:<9} {st['llm_calls']:>5} {st['input_tokens']:>8} {st['output_tokens']:>8} "
+                       f"{cached:>7} {st['credits']:>7g} {st['seconds']:>7}")
     if show_trace:
         out += ["", "TRACE", "-----"]
         for t in report["trace"]:

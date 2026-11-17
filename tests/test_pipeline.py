@@ -3,7 +3,7 @@
 import asyncio
 
 import pytest
-from conftest import (GOOD_TEXT, NUM_SENTENCE, PLAN, POPULATION, QUESTION, TODAY, FakeLLM, FakeSearch, make_settings,
+from conftest import (GOOD_TEXT, NUM_SENTENCE, PLAN, POP_SENTENCE, POPULATION, QUESTION, FakeLLM, FakeSearch, make_settings,
                       trace_steps)
 
 from research_agent import storage
@@ -33,26 +33,34 @@ def test_normal_run(agent, conn):
     t = r["task"]
     assert t["status"] == "done", t
     assert t["stop_reason"] == "coverage_complete"
-    # round 1: tiers 1-2 only, basic depth, restricted to on/after the anchor date
+    # round 1: tiers 1-2 only, advanced depth (evidence searches), restricted to on/after the anchor date
     for call in search.search_calls:
-        assert call["depth"] == "basic" and call["start_date"] == "2025-01-01"
+        assert call["depth"] == "advanced" and call["start_date"] == "2025-01-01"
         assert "onclive.com" not in call["include_domains"] and "fda.gov" in call["include_domains"]
     # one batched extract call for the whole round (3 queries x 2 URLs)
     assert len(search.extract_calls) == 1 and len(search.extract_calls[0]) == 6
+    assert search.extract_depths == ["basic"]
     claims = [c for c in r["claims"] if c["section"] == "new"]
     assert len(claims) == 2
     for c in claims:
         assert c["text"] == GOOD_TEXT and c["claim_type"] == "fact"
         assert c["evidence_level"] == "phase 3 randomized trial" and c["population"] == POPULATION
-        assert c["citations"][0]["verdict"] == "supported"
-        assert c["citations"][0]["source_sentence"] == NUM_SENTENCE  # stored once, verbatim
+        assert c["verdict"] == "supported" and c["citations"][0]["verdict"] == "supported"
+        texts = [x["text"] for x in c["citations"][0]["sentences"]]
+        assert NUM_SENTENCE in texts  # read back from the evidence store, verbatim
+        assert all(x["id"].startswith(f"E{c['citations'][0]['evidence_id']}-") for x in c["citations"][0]["sentences"])
+        g = c["citations"][0]
+        assert g["number_gate"]["status"] == "pass" and g["id_gate"]["status"] == "n/a"
+        assert g["entail_gate"]["status"] == "supported"
     assert {c["citations"][0]["source_type"] for c in claims} <= {"regulatory_action", "peer_reviewed_article"}
     ans = t["final_answer"]
     for section in ("1. BOTTOM LINE", "2. WHAT'S NEW SINCE 2025-01-01", "3. SOURCES DISAGREE",
-                    "4. NOT YET ESTABLISHED", "5. CHECK BEFORE ACTING", DISCLAIMER, "Key numbers"):
+                    "4. NOT YET ESTABLISHED", "5. CHECK BEFORE ACTING", DISCLAIMER, "Cited sentences",
+                    "Checks: numbers pass"):
         assert section in ans
-    # credits: 3 basic searches + one extract batch of 6 pages (ceil(6/5) = 2)
-    assert r["totals"]["credits"] == 5
+    # credits: 3 advanced searches (2 each) + one extract batch of 6 pages (ceil(6/5) = 2)
+    assert r["totals"]["credits"] == 8
+    assert r["task"]["usage"]["used"]["tavily"] == 4  # 3 searches + 1 extract call
     assert t["answer_json"]["bottom_line"]["confidence"] == "high"
     assert events[0]["step"] == "start" and events[-1]["step"] == "done"
 
@@ -74,6 +82,10 @@ def test_writer_sees_notes_not_raw_page_text(agent, conn):
     writer_prompt = llm.users("Draft")[0]
     assert "<untrusted_note" in writer_prompt and "<untrusted_source" not in writer_prompt
     assert "Source page https://" not in writer_prompt  # raw page text never reaches the writer
+    assert NUM_SENTENCE not in writer_prompt and POP_SENTENCE not in writer_prompt
+    for name in ("Coverage", "Plan"):
+        for u in llm.users(name):
+            assert NUM_SENTENCE not in u and "<untrusted_source" not in u
 
 
 def test_empty_search_results_end_insufficient(agent, conn):
@@ -83,7 +95,7 @@ def test_empty_search_results_end_insufficient(agent, conn):
     llm = FakeLLM(conn, Coverage=thin)
     r = agent.full(llm, FakeSearch(empty=True))
     assert r["task"]["status"] == "insufficient_evidence"
-    assert r["task"]["stop_reason"] == "few_new_evidence"
+    assert r["task"]["stop_reason"] == "no_new_evidence"
     assert llm.count("Draft") == 0 and r["claims"] == []
     assert "Insufficient evidence" in r["task"]["final_answer"]
     assert {s["status"] for s in r["sub_queries"]} == {"empty"}
@@ -174,3 +186,34 @@ def test_task_state_persisted_before_finish(agent, conn):
     agent.prepare(FakeLLM(conn), FakeSearch())
     assert storage.get_task(conn, 1)["brief"]["aspects"]
     assert storage.get_trace(conn, 1)[-1]["step"] == "approval"
+
+
+def test_writer_connection_drop_is_retried_patiently(agent, conn):
+    n = {"i": 0}
+
+    def flaky(call):
+        n["i"] += 1
+        if n["i"] == 1:
+            return ConnectionError("connection reset")
+        from conftest import h_draft
+        return h_draft(call)
+
+    r = agent.full(FakeLLM(conn, Draft=flaky), FakeSearch())
+    assert r["task"]["status"] == "done" and n["i"] == 2
+    assert any("trying again" in t["message"] for t in trace_steps(r, "write"))
+
+
+def test_failed_writer_can_be_resumed_without_new_research(agent, conn):
+    search = FakeSearch()
+    r = agent.full(FakeLLM(conn, Draft=lambda c: ConnectionError("connection reset")), search)
+    t = r["task"]
+    assert t["status"] == "failed" and "Resume with: research --resume" in trace_steps(r, "error")[-1]["message"]
+    n_search, n_extract = len(search.search_calls), len(search.extract_calls)
+
+    from research_agent.engine import resume
+    r2 = asyncio.run(resume(t["id"], **agent.kw(FakeLLM(conn), search)))
+    assert r2["task"]["status"] == "done" and r2["task"]["error"] is None
+    assert len(search.search_calls) == n_search and len(search.extract_calls) == n_extract
+    assert [c for c in r2["claims"] if c["verdict"] == "supported"]
+    with pytest.raises(ValueError):  # a finished task cannot be resumed
+        asyncio.run(resume(t["id"], **agent.kw(FakeLLM(conn), search)))

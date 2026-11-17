@@ -1,6 +1,6 @@
-"""Cache checked before every Tavily call: search results by exact (case/space-normalized) query + params, and
-extracted pages by URL + the extraction query (Tavily returns only the chunks relevant to that query). Both are
-reused for `cache_ttl_days` (default 7). Empty search results are never cached."""
+"""Search cache checked before every Tavily search: results by exact (case/space-normalized) query + params, reused
+for `cache_ttl_days` (default 7). Empty search results are never cached. Extracted pages are cached as the sources'
+stored raw text (storage.cached_texts), keyed by normalized URL."""
 
 from __future__ import annotations
 
@@ -26,16 +26,3 @@ def get_search(conn, key: str, ttl_days: int) -> list[SearchHit] | None:
 def put_search(conn, key: str, query: str, params: dict, hits: list[SearchHit]) -> None:
     if hits:  # an empty result may be a transient miss; don't pin it for a week
         storage.put_search_cache(conn, key, query, params, [asdict(h) for h in hits])
-
-
-def extract_query_key(query: str | None) -> str:
-    return normalize_query(query or "")
-
-
-def get_pages(conn, urls: list[str], query: str | None, ttl_days: int) -> dict[str, str]:
-    return storage.get_extract_cache(conn, urls, extract_query_key(query), ttl_days)
-
-
-def put_pages(conn, pages: dict[str, str], query: str | None) -> None:
-    if pages:
-        storage.put_extract_cache(conn, pages, extract_query_key(query))

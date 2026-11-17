@@ -1,7 +1,9 @@
-"""Fakes for Token Factory (LLMClient) and Tavily (SearchBackend), plus fixtures.
+"""Fakes for Token Factory (LLMClient), Tavily (SearchBackend) and the identifier resolver, plus fixtures.
 
-FakeSearch mimics Tavily's include_domains restrict mode and returns deterministic oncology pages.
-FakeLLM answers each schema with a default handler that reads the DB like a real model would read its prompt.
+FakeSearch mimics Tavily's include_domains restrict mode and returns deterministic oncology pages (full text).
+FakeLLM answers each schema with a default handler that reads its prompt like a real model would: sentence lines
+look like "[E3-2] text" inside <untrusted_source id="E3"> blocks.
+FakeIds resolves identifiers from a dict; anything not in it is not_found.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from typing import Any, Callable
 import pytest
 
 from research_agent import storage
+from research_agent.backends.identifiers import Resolution
 from research_agent.backends.llm import LLMResult
 from research_agent.backends.search_base import ExtractResult, SearchHit, SearchResult
 from research_agent.config import Budget, Limits, Network, Settings
@@ -35,6 +38,7 @@ TIER3_SENTENCE = "Drugx showed an objective response rate of 61% in an early ana
 GOOD_TEXT = "Progression-free survival was 23.7 months versus 16.6 months with drugx (HR 0.70)."
 
 BLOCK_RE = re.compile(r'<untrusted_source id="E(\d+)"([^>]*)>\n(.*?)\n</untrusted_source>', re.S)
+LINE_RE = re.compile(r"^\[(E\d+-\d+)\](?: \(context\))? (.*)$", re.M)
 
 
 def slug(text: str) -> str:
@@ -43,7 +47,7 @@ def slug(text: str) -> str:
 
 def page_for(url: str) -> str:
     if "onclive.com" in url:
-        return f"{TIER3_SENTENCE} The company said more data are expected. Source page {url}."
+        return f"{TIER3_SENTENCE} The company said more data are expected soon. Source page {url}."
     return (f"On June 1, 2025, regulators and investigators reported new data on drugx for EGFR-mutated "
             f"non-small cell lung cancer. {POP_SENTENCE} {NUM_SENTENCE} Source page {url}.")
 
@@ -58,16 +62,19 @@ class FakeSearch:
 
     def __init__(self, *, results: dict[str, list[SearchHit]] | None = None, fail: dict[str, Exception] | None = None,
                  domains: tuple[str, ...] = ("fda.gov", "nejm.org", "onclive.com"), pages: dict[str, str] | None = None,
-                 login_blocked: tuple[str, ...] = (), extract_error: Exception | None = None, empty: bool = False):
+                 login_blocked: tuple[str, ...] = (), basic_fails: tuple[str, ...] = (),
+                 extract_error: Exception | None = None, empty: bool = False):
         self.results = results or {}
         self.fail = fail or {}
         self.domains = domains
         self.pages = pages or {}
-        self.login_blocked = set(login_blocked)
+        self.login_blocked = set(login_blocked)  # fail at every depth
+        self.basic_fails = set(basic_fails)  # fail at basic depth, succeed at advanced
         self.extract_error = extract_error
         self.empty = empty
         self.search_calls: list[dict] = []
         self.extract_calls: list[list[str]] = []
+        self.extract_depths: list[str] = []
 
     def default_hits(self, query: str) -> list[SearchHit]:
         return [SearchHit(url=f"https://www.{d}/{slug(query)}", title=f"{d} {query}", content=f"{query} snippet",
@@ -82,27 +89,64 @@ class FakeSearch:
         hits = [h for h in hits if _domain_ok(h.url, include_domains)]  # Tavily restrict mode
         return SearchResult(hits=hits[:max_results], credits=2.0 if depth == "advanced" else 1.0)
 
-    async def extract(self, urls, *, query=None):
+    async def extract(self, urls, *, depth="basic"):
         self.extract_calls.append(list(urls))
+        self.extract_depths.append(depth)
         if self.extract_error:
             raise self.extract_error
-        pages = {u: self.pages.get(u, page_for(u)) for u in urls if u not in self.login_blocked}
-        failed = {u: "403 Forbidden: login required" for u in urls if u in self.login_blocked}
+        blocked = self.login_blocked | (self.basic_fails if depth == "basic" else set())
+        pages = {u: self.pages.get(u, page_for(u)) for u in urls if u not in blocked}
+        failed = {u: "403 Forbidden: login required" for u in urls if u in blocked}
         return ExtractResult(pages=pages, failed=failed, credits=float(math.ceil(len(pages) / 5)))
+
+
+class FakeIds:
+    """Identifier resolver: {"pmid:123": "Title", ...}; unknown identifiers are not_found."""
+
+    def __init__(self, known: dict[str, str] | None = None, error: bool = False):
+        self.known = known or {}
+        self.error = error
+        self.calls: list[str] = []
+
+    async def resolve(self, ident, take=None):
+        self.calls.append(f"{ident.kind}:{ident.value}")
+        if take is not None and not take({"pmid": "pubmed", "nct": "ctgov", "doi": "crossref"}[ident.kind]):
+            return Resolution(ident, "skipped", detail="quota")
+        if self.error:
+            return Resolution(ident, "error", detail="service down")
+        title = self.known.get(f"{ident.kind}:{ident.value}")
+        return Resolution(ident, "found", title) if title else Resolution(ident, "not_found", detail="no record")
 
 
 # --- fake LLM ------------------------------------------------------------------
 
 def blocks(user: str) -> list[tuple[int, str]]:
+    """(evidence id, block body) for each source block in a prompt."""
     return [(int(m.group(1)), m.group(3)) for m in BLOCK_RE.finditer(user)]
+
+
+def sentence_lines(user: str) -> list[tuple[str, str]]:
+    """(sentence ID, text) for every sentence line in a prompt."""
+    return LINE_RE.findall(user)
 
 
 def latest_task(conn) -> int:
     return conn.execute("SELECT max(id) FROM tasks").fetchone()[0]
 
 
-def notes_with_numbers(conn) -> list[dict]:
-    return [n for n in storage.get_notes(conn, latest_task(conn)) if n["details"].get("numbers")]
+def num_notes(conn) -> list[dict]:
+    """Notes whose cited sentence is NUM_SENTENCE (the drugx result)."""
+    return [n for n in storage.get_notes(conn, latest_task(conn)) if n["text"] == GOOD_TEXT]
+
+
+def sid(conn, note: dict, sentence: str) -> str:
+    """The sentence ID in a note's citations whose text is `sentence`."""
+    tid = latest_task(conn)
+    for ref in note["sentence_ids"]:
+        e, i = ref[1:].split("-")
+        if storage.evidence_sentences(conn, tid, int(e), [int(i)]).get(int(i)) == sentence:
+            return ref
+    raise AssertionError(f"{sentence!r} not cited by note {note['id']}")
 
 
 def h_brief(call):
@@ -117,16 +161,14 @@ def h_plan(call):
 
 def h_notes(call):
     notes, meta = [], []
-    for eid, text in blocks(call.user):
-        n: dict[str, Any] = {"text": f"Finding from E{eid}", "evidence_ids": [eid]}
-        if NUM_SENTENCE in text:
-            n["numbers"] = [{"value": v, "sentence": NUM_SENTENCE} for v in ("23.7", "16.6", "0.70")]
-        if TIER3_SENTENCE in text:
-            n["numbers"] = [{"value": "61%", "sentence": TIER3_SENTENCE}]
-        if POP_SENTENCE in text:
-            n.update(design="phase 3 randomized trial", population=POPULATION, population_sentence=POP_SENTENCE,
-                     date="2025-06-01")
-        notes.append(n)
+    for ref, text in sentence_lines(call.user):
+        if text == NUM_SENTENCE:
+            pop = next((r for r, t in sentence_lines(call.user) if t == POP_SENTENCE and r.split("-")[0] == ref.split("-")[0]), None)
+            notes.append({"text": GOOD_TEXT, "sentence_ids": [ref] + ([pop] if pop else [])})
+        elif text == TIER3_SENTENCE:
+            notes.append({"text": "Drugx showed an objective response rate of 61% in an early analysis.",
+                          "sentence_ids": [ref]})
+    for eid, _ in blocks(call.user):
         meta.append({"evidence_id": eid, "source_type": None, "evidence_date": None})
     return {"notes": notes, "evidence": meta}
 
@@ -140,27 +182,25 @@ def h_coverage_complete(call):
             "follow_up_queries": []}
 
 
-def good_item(note: dict) -> dict:
-    eid = note["evidence_ids"][0]
-    return {"text": GOOD_TEXT, "claim_type": "fact", "evidence_ids": [eid], "date": "2025-06-01",
-            "evidence_level": "phase 3 randomized trial", "population": note["details"].get("population"),
-            "numbers": [{"value": v, "sentence": NUM_SENTENCE, "evidence_id": eid} for v in ("23.7", "16.6", "0.70")]}
+def good_item(conn, note: dict) -> dict:
+    return {"text": GOOD_TEXT, "claim_type": "fact", "sentence_ids": note["sentence_ids"], "date": "2025-06-01",
+            "evidence_level": "phase 3 randomized trial", "population": POPULATION}
 
 
 def h_draft(call):
-    notes = [n for n in notes_with_numbers(call.llm.conn) if NUM_SENTENCE in str(n["details"])]
+    conn = call.llm.conn
     return {"sufficient": True,
             "bottom_line": {"text": "Drugx improved progression-free survival.", "confidence": "high",
                             "reason": "phase 3 data"},
-            "items": [good_item(n) for n in notes[:2]],
+            "items": [good_item(conn, n) for n in num_notes(conn)[:2]],
             "not_established": ["overall survival benefit"],
             "check_before_acting": ["confirm label wording on fda.gov"]}
 
 
 def h_repair(call):
-    notes = [n for n in notes_with_numbers(call.llm.conn) if NUM_SENTENCE in str(n["details"])]
-    ids = [int(x) for x in re.findall(r"^claim_id (\d+):", call.user, re.M)]
-    return {"claims": [{**good_item(notes[0]), "claim_id": i, "text": GOOD_TEXT + " (revised)"} for i in ids]}
+    """Re-cite the claim to the first drugx note, with the good text."""
+    n = num_notes(call.llm.conn)[0]
+    return {"action": "recite", "text": GOOD_TEXT, "sentence_ids": n["sentence_ids"], "reason": "fixed"}
 
 
 def h_bottom_line(call):
@@ -169,7 +209,7 @@ def h_bottom_line(call):
 
 
 def h_verify(call):
-    return {"verdicts": [{"evidence_id": eid, "verdict": "supported", "note": "stated"} for eid, _ in blocks(call.user)]}
+    return {"verdict": "supported", "note": "stated"}
 
 
 class FakeLLM:
@@ -177,7 +217,7 @@ class FakeLLM:
         self.conn = conn
         self.handlers: dict[str, Callable] = {
             "Brief": h_brief, "Plan": h_plan, "WorkerNotes": h_notes, "Coverage": h_coverage_complete,
-            "Draft": h_draft, "Repair": h_repair, "ClaimVerification": h_verify, "BottomLine": h_bottom_line,
+            "Draft": h_draft, "RepairAction": h_repair, "Entailment": h_verify, "BottomLine": h_bottom_line,
             **overrides,
         }
         self.calls: list[SimpleNamespace] = []
@@ -200,10 +240,10 @@ class FakeLLM:
 
 # --- fixtures ------------------------------------------------------------------
 
-def make_settings(**limits: Any) -> Settings:
+def make_settings(budget: dict | None = None, **limits: Any) -> Settings:
     s = Settings(network=Network(max_retries=2, backoff_base_s=0, backoff_max_s=0, search_timeout_s=2,
-                                 extract_timeout_s=2, llm_timeout_s=2),
-                 budget=Budget(time_s=60, credits=1000))
+                                 extract_timeout_s=2, llm_timeout_s=2, patient_waits_s=(0, 0)),
+                 budget=Budget(time_s=60, **(budget or {})))
     return replace(s, limits=replace(Limits(), **limits)) if limits else s
 
 
@@ -222,13 +262,16 @@ def conn():
 class Agent:
     def __init__(self, conn, settings):
         self.conn, self.settings = conn, settings
+        self.ids = FakeIds()
 
-    def kw(self, llm, search, settings=None, events=None):
+    def kw(self, llm, search, settings=None, events=None, ids=None):
         return dict(llm=llm, search=search, conn=self.conn, settings=settings or self.settings,
-                    on_event=events.append if events is not None else None)
+                    on_event=events.append if events is not None else None, ids=ids or self.ids)
 
     def prepare(self, llm, search, question=QUESTION, **kw):
-        return asyncio.run(prepare(question, today=TODAY, **self.kw(llm, search, **kw)))
+        kw = self.kw(llm, search, **kw)
+        kw.pop("ids")
+        return asyncio.run(prepare(question, today=TODAY, **kw))
 
     def run(self, task_id, llm, search, **kw):
         return asyncio.run(run(task_id, **self.kw(llm, search, **kw)))
@@ -244,3 +287,7 @@ def agent(conn, settings) -> Agent:
 
 def trace_steps(report, step: str) -> list[dict]:
     return [t for t in report["trace"] if t["step"] == step]
+
+
+def active(report, section: str = "new") -> list[dict]:
+    return [c for c in report["claims"] if c["section"] == section and c["status"] != "deleted"]

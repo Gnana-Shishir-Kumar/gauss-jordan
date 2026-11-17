@@ -64,42 +64,55 @@ class Models:
 class Limits:
     min_queries: int = 3
     max_queries_per_round: int = 5
-    max_rounds: int = 2
     max_follow_ups_per_aspect: int = 1  # per follow-up round, only for thin/conflicting aspects
-    max_repair_passes: int = 1
+    max_repair_rounds: int = 2  # per failed claim, one claim at a time
     search_results: int = 10
     extract_per_query: int = 2  # top URLs per worker sent to extraction
     extract_per_round: int = 10  # cap on URLs extracted per round
     extract_batch_size: int = 20  # Tavily extract accepts up to 20 URLs per call
-    min_new_kept_per_round: int = 2
     min_independent_sources: int = 2  # distinct domains per aspect
     min_relevance: float = 0.15
-    excerpt_chars: int = 1500
+    sentences_per_source: int = 14  # sentences each worker sees per source (by relevance, with their IDs)
+    sentence_chars_per_source: int = 2600
     near_duplicate_threshold: float = 0.7
     max_notes_for_writer: int = 40
     max_concurrency: int = 5
     round1_tiers: tuple[int, ...] = (1, 2)
     follow_up_tiers: tuple[int, ...] = (1, 2, 3)
-    round1_depth: str = "basic"
+    round1_depth: str = "advanced"  # evidence searches; planning probes would use basic
     follow_up_depth: str = "advanced"
+    chunks_per_source: int = 3  # advanced search only
+    max_research_rounds: int = 4  # safety cap; reaching it is reported as quota_reached
+    repair_search_results: int = 5
+    repair_extract_per_search: int = 2
     default_anchor_days: int = 365
 
 
 @dataclass(frozen=True)
 class Budget:
     time_s: float = 420.0  # wall clock for the research phase (after approval)
-    credits: float = 60.0  # Tavily credits per task
+    tavily_calls: int = 40  # one pooled budget of Tavily calls (search + extract) per brief
+    tavily_repair_reserve: int = 8  # of which this many are reserved for targeted repair searches
+    pubmed_calls: int = 60
+    ctgov_calls: int = 40
+    openfda_calls: int = 20
+    crossref_calls: int = 40
 
 
 @dataclass(frozen=True)
 class Network:
-    llm_timeout_s: float = 300.0  # the writer took 165 s in a live run; this is a ceiling, not a delay
+    llm_timeout_s: float = 480.0  # the writer took 269 s in a live run (2026-11-17); a ceiling, not a delay
     llm_max_tokens: int = 16384  # these models spend many output tokens on reasoning before the JSON
     search_timeout_s: float = 30.0
     extract_timeout_s: float = 60.0
+    id_timeout_s: float = 20.0  # PubMed / ClinicalTrials.gov / Crossref lookups
     max_retries: int = 3
     backoff_base_s: float = 1.0
     backoff_max_s: float = 10.0
+    retry_after_max_s: float = 60.0  # longest Retry-After we honor on a 429
+    # Extra waits before re-trying the writer after its normal retries hit a transient error (connection drop,
+    # timeout, 5xx). A writer failure would otherwise throw away the whole research phase.
+    patient_waits_s: tuple[float, ...] = (15.0, 45.0)
 
 
 @dataclass(frozen=True)
@@ -113,6 +126,8 @@ class Settings:
     nebius_base_url: str = NEBIUS_BASE_URL
     nebius_api_key: str = field(default="", repr=False)
     tavily_api_key: str = field(default="", repr=False)
+    ncbi_api_key: str = field(default="", repr=False)  # optional: raises the PubMed rate limit from 3/s to 10/s
+    contact_email: str = ""  # optional: sent to NCBI/Crossref as their polite-pool contact, only if set
 
     def missing_keys(self) -> list[str]:
         missing = []
@@ -137,4 +152,6 @@ def get_settings(env_file: str | Path = ".env") -> Settings:
         db_path=os.environ.get("RESEARCH_DB_PATH", "research.db"),
         nebius_api_key=os.environ.get("NEBIUS_API_KEY", ""),
         tavily_api_key=os.environ.get("TAVILY_API_KEY", ""),
+        ncbi_api_key=os.environ.get("NCBI_API_KEY", ""),
+        contact_email=os.environ.get("RESEARCH_CONTACT_EMAIL", ""),
     )

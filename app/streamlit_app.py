@@ -23,7 +23,7 @@ from research_agent.exports import sources_used, to_csv, to_ris
 from research_agent.privacy import IdentifierError, find_identifiers
 from research_agent.prompts import PROMPT_VERSION
 from research_agent.render import (DISCLAIMER, NO_IDENTIFIERS, USE_LIMITS, claim_verdict, evidence_label,
-                                   is_flagged, key_numbers, sort_items)
+                                   failed_gate, is_flagged, cited_sentences, sort_items)
 from research_agent.sources import is_preliminary, tier_label, type_label
 
 VERDICT = {"supported": ("green", ":material/check_circle:"), "partial": ("orange", ":material/rule:"),
@@ -105,6 +105,30 @@ def live_progress(task_id: int) -> None:
         show_progress_log(report)
 
 
+GATE_COLOR = {"pass": "green", "supported": "green", "n/a": "gray", "skipped": "gray", "error": "orange",
+              "partial": "orange", "fail": "red", "unsupported": "red"}
+
+
+def gate_badges(c: dict) -> list[str]:
+    """One badge per verifier gate, in order; the first failing gate is what sent the claim to repair."""
+    if c.get("rejected"):
+        why = "; ".join(f"{r['id'] or '-'}: {r['reason']}" for r in c["rejected"])
+        return [f":red-badge[citation check failed] :gray[{md(why)}]"]
+    out = []
+    cits = c.get("citations") or []
+    for key, label in (("number_gate", "numbers"), ("id_gate", "identifiers"), ("entail_gate", "entailment")):
+        gates = [x.get(key) for x in cits if x.get(key)]
+        if not gates:
+            continue
+        st_ = next((g["status"] for g in gates if g.get("status") == "fail"), gates[0].get("status"))
+        extra = " (escalated)" if key == "entail_gate" and gates[0].get("escalated") else ""
+        out.append(f":{GATE_COLOR.get(st_, 'gray')}-badge[{label}: {st_}{extra}]")
+    gate = failed_gate(c)
+    if gate:
+        out.append(f":gray[failed at the {gate} gate]")
+    return out
+
+
 def item_card(c: dict, anchor: str | None = None) -> None:
     v = claim_verdict(c)
     color, icon = VERDICT.get(v, ("gray", ""))
@@ -115,7 +139,9 @@ def item_card(c: dict, anchor: str | None = None) -> None:
     badges += [f":{TIER_COLOR[t]}-badge[{tier_label(t).split(' · ')[0]}]" for t in tiers]
     if any(is_preliminary(x.get("source_type")) for x in cits):
         badges.append(":orange-badge[:material/science: PRELIMINARY]")
-    if is_flagged(c):
+    if c.get("status") == "unverified":
+        badges.append(":red-badge[UNVERIFIED: kept, could not be checked]")
+    elif is_flagged(c):
         badges.append(":red-badge[FLAGGED: not verified]")
     if before_anchor(c.get("item_date"), anchor):
         badges.append(f":red-badge[DATED BEFORE {anchor}: not new]")
@@ -124,16 +150,17 @@ def item_card(c: dict, anchor: str | None = None) -> None:
         st.markdown(f"**{c.get('item_date') or 'date not stated'} · {', '.join(types)}**  \n{md(c['text'])}")
         st.caption(f"Evidence level: {md(c.get('evidence_level') or 'not stated')} · {md(evidence_label(c))}  \n"
                    f"Population: {md(c.get('population') or 'population not stated')}")
-        nums = key_numbers(c)
-        if nums:
-            st.markdown("**Key numbers** (each beside its verbatim source sentence)")
+        st.markdown(" ".join(gate_badges(c)))
+        sents = cited_sentences(c)
+        if sents:
+            st.markdown("**Cited sentences** (verbatim from the stored page text)")
             claim_nums = number_tokens(c["text"])
-            for sentence, eid in nums:
+            for sid, sentence in sents:
                 in_sentence = numbers_in(sentence)
                 found = ", ".join(dict.fromkeys(raw for raw, norm in claim_nums if norm in in_sentence)) or "-"
                 left, right = st.columns([1, 5])
                 left.markdown(f"`{found}`")
-                right.markdown(f"> {md(sentence)}  \n:gray[E{eid}]")
+                right.markdown(f"> {md(sentence)}  \n:gray[{sid}]")
         for x in cits:
             vc, _ = VERDICT.get(x.get("verdict") or "unverified", ("gray", ""))
             title = md(x.get("title") or x.get("domain") or x.get("url"))
@@ -176,7 +203,8 @@ def show_report(report: dict) -> None:
     else:
         st.markdown("No bottom line: the evidence found was insufficient.")
 
-    claims = report["claims"]
+    removed = [c for c in report["claims"] if c.get("status") == "deleted"]
+    claims = [c for c in report["claims"] if c.get("status") != "deleted"]
     st.markdown(f"#### 2. What's new since {t.get('anchor_date')}")
     new = sort_items([c for c in claims if c["section"] == "new"])
     if not new:
@@ -189,6 +217,11 @@ def show_report(report: dict) -> None:
         item_card(c, t.get("anchor_date"))
     if not conflicts:
         st.markdown("No conflicts found.")
+    if removed:
+        with st.expander(f"Removed during verification ({len(removed)})", icon=":material/delete:"):
+            for c in removed:
+                last = (c.get("repair_log") or [{}])[-1]
+                st.markdown(f"- ~~{md(c.get('original_text') or c['text'])}~~  \n  :gray[{md(last.get('detail', ''))}]")
     st.markdown("#### 4. Not yet established")
     st.markdown("\n".join(f"- {md(x)}" for x in ans.get("not_established") or ["(none listed)"]))
     st.markdown("#### 5. Check before acting")
@@ -214,6 +247,15 @@ def show_trace(report: dict) -> None:
     t = report["task"]
     with st.expander("Trace", icon=":material/timeline:"):
         st.caption(f"Models: {t.get('model_ids')} · prompt version: {t.get('prompt_version')}")
+        usage = t.get("usage") or {}
+        if isinstance(usage, dict) and usage.get("used"):
+            st.caption("API calls: " + ", ".join(f"{k} {v}/{usage['caps'].get(k)}" for k, v in usage["used"].items())
+                       + f" · Tavily repair reserve used {usage.get('tavily_repair_used', 0)}/"
+                         f"{usage.get('tavily_repair_reserve', 0)}")
+        if report.get("steps"):
+            st.markdown("**Cost by step** (cached share: n/r = not reported by the API)")
+            st.dataframe([{**s, "cached_share": f"{s['cached_share']:.0%}" if s["cached_share"] is not None else "n/r"}
+                          for s in report["steps"]], use_container_width=True, hide_index=True)
         st.dataframe([{"step": e["step"], "level": e["level"], "message": e["message"], "model": e["model_id"],
                        "prompt_version": e["prompt_version"], "latency_ms": e["latency_ms"],
                        "in_tok": e["input_tokens"], "out_tok": e["output_tokens"], "credits": e["tavily_credits"],
@@ -303,7 +345,7 @@ def main() -> None:
         show_brief(report)
         st.markdown("**Planned searches** (round 1: regulatory, registry, guideline and journal sources only)")
         st.markdown("\n".join(f"{i}. {md(s['text'])}" for i, s in enumerate(report["sub_queries"], 1)))
-        st.caption(f"Budget: up to {settings.limits.max_rounds} rounds, {settings.budget.credits:g} Tavily credits, "
+        st.caption(f"Budget: up to {settings.limits.max_research_rounds} rounds, {settings.budget.tavily_calls} Tavily calls ({settings.budget.tavily_repair_reserve} reserved for repair), "
                    f"{settings.budget.time_s:g}s.")
         if st.button("Start research", type="primary", icon=":material/play_arrow:"):
             st.session_state.started = task_id
