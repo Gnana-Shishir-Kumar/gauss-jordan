@@ -131,7 +131,13 @@ async def apply_item(ctx: RunContext, item: Item, notes: list[dict], *, position
         ctype = "uncertain"
         await ctx.emit("check", f"{label}: dated {item_date}, before the anchor date {anchor}; marked uncertain",
                        level="warning")
-    fields = dict(text=item.text, claim_type=ctype, evidence_level=level, population=population, item_date=item_date)
+    impact = item.impact
+    if impact and numbers.check(impact, texts).status == "fail":
+        await ctx.emit("check", f"{label}: practice-impact note states numbers not in the cited sentences; dropped",
+                       level="warning", detail={"impact": impact})
+        impact = None
+    fields = dict(text=item.text, claim_type=ctype, evidence_level=level, population=population, item_date=item_date,
+                  change_type=item.change_type, impact=impact)
     if claim_id is None:
         claim_id = storage.add_claim(ctx.conn, ctx.task_id, position=position, section=section, rejected=rejected,
                                      **fields)

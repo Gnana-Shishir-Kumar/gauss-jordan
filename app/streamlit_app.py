@@ -23,7 +23,7 @@ from research_agent.exports import sources_used, to_csv, to_ris
 from research_agent.privacy import IdentifierError, find_identifiers
 from research_agent.prompts import PROMPT_VERSION
 from research_agent.render import (DISCLAIMER, NO_IDENTIFIERS, USE_LIMITS, claim_verdict, evidence_label,
-                                   failed_gate, is_flagged, cited_sentences, sort_items)
+                                   change_rows, failed_gate, is_flagged, cited_sentences, sort_items)
 from research_agent.sources import is_preliminary, tier_label, type_label
 
 VERDICT = {"supported": ("green", ":material/check_circle:"), "partial": ("orange", ":material/rule:"),
@@ -31,7 +31,7 @@ VERDICT = {"supported": ("green", ":material/check_circle:"), "partial": ("orang
            "uncited": ("gray", ":material/help:"), "unverified": ("gray", ":material/help:")}
 STATUS = {"done": "green", "insufficient_evidence": "orange", "failed": "red", "needs_clarification": "blue"}
 CONF = {"high": "green", "moderate": "orange", "low": "red"}
-TIER_COLOR = {1: "blue", 2: "violet", 3: "gray"}
+TIER_COLOR = {1: "blue", 2: "violet", 3: "orange", 4: "gray"}
 RUNNING = {"researching", "writing", "verifying"}
 LEVEL_ICON = {"info": ":material/check:", "warning": ":material/warning:", "error": ":material/error:"}
 
@@ -84,7 +84,11 @@ def show_brief(report: dict) -> None:
     t, b = report["task"], report["task"].get("brief") or {}
     st.markdown(f"**Cancer type:** {md(b.get('cancer_type'))}  \n**Setting:** {md(b.get('setting'))}  \n"
                 f"**Question:** {md(b.get('question'))}  \n**Since:** {t.get('anchor_date')}"
-                + (" *(no date given: defaulted to 12 months ago)*" if b.get("anchor_defaulted") else ""))
+                + (" *(no date given: defaulted to 12 months ago)*" if b.get("anchor_defaulted") else "")
+                + "  \n**Guideline baseline:** " + md(" ".join(x for x in (
+                    b.get("guideline_name"), b.get("guideline_version"),
+                    b.get("guideline_date") and f"dated {b['guideline_date']}") if x) or "not stated")
+                + " *(user-supplied; NCCN is never fetched)*")
     st.markdown("**A complete answer must cover:** " + "; ".join(md(a) for a in b.get("aspects", [])))
 
 
@@ -137,8 +141,10 @@ def item_card(c: dict, anchor: str | None = None) -> None:
     types = sorted({type_label(x.get("source_type")) for x in cits})
     badges = [f":{color}-badge[{icon} {v.replace('_', ' ')}]", f":gray-badge[{c['claim_type']}]"]
     badges += [f":{TIER_COLOR[t]}-badge[{tier_label(t).split(' · ')[0]}]" for t in tiers]
-    if any(is_preliminary(x.get("source_type")) for x in cits):
+    if any(is_preliminary(x) for x in cits):
         badges.append(":orange-badge[:material/science: PRELIMINARY]")
+    if "company-reported, not peer-reviewed" in (c.get("labels") or []):
+        badges.append(":red-badge[COMPANY-REPORTED: not peer-reviewed]")
     if c.get("status") == "unverified":
         badges.append(":red-badge[UNVERIFIED: kept, could not be checked]")
     elif is_flagged(c):
@@ -205,6 +211,12 @@ def show_report(report: dict) -> None:
 
     removed = [c for c in report["claims"] if c.get("status") == "deleted"]
     claims = [c for c in report["claims"] if c.get("status") != "deleted"]
+    st.markdown(f"#### What changed since {t.get('anchor_date')}")
+    rows = change_rows(claims)
+    if rows:
+        st.dataframe([{k: r[k] for k in ("change", "date", "evidence_level", "tier", "status", "verified", "impact")}
+                      for r in rows], use_container_width=True, hide_index=True,
+                     column_config={"impact": st.column_config.TextColumn("practice impact (interpretation)")})
     st.markdown(f"#### 2. What's new since {t.get('anchor_date')}")
     new = sort_items([c for c in claims if c["section"] == "new"])
     if not new:
@@ -212,10 +224,19 @@ def show_report(report: dict) -> None:
     for c in new:
         item_card(c, t.get("anchor_date"))
     st.markdown("#### 3. Sources disagree")
+    for k in ans.get("conflicts_detected") or []:
+        with st.container(border=True):
+            st.markdown(f":orange-badge[sources disagree] **{md(k['endpoint'])}** for {md(k['subject'])} "
+                        "(both shown; neither is picked)")
+            cols = st.columns(len(k["sides"]))
+            for col, s in zip(cols, k["sides"]):
+                col.markdown(f"**{md(s['value'])}** · E{s['evidence_id']} · tier {s['tier']} · "
+                             f"{s['date'] or 'date not stated'}  \n> {md(s['sentence'])}  \n"
+                             f":gray[{s['sentence_id']}] [{md(s['title'] or s['url'])}]({s['url']})")
     conflicts = [c for c in claims if c["section"] == "conflict"]
     for c in conflicts:
         item_card(c, t.get("anchor_date"))
-    if not conflicts:
+    if not conflicts and not ans.get("conflicts_detected"):
         st.markdown("No conflicts found.")
     if removed:
         with st.expander(f"Removed during verification ({len(removed)})", icon=":material/delete:"):
@@ -302,6 +323,11 @@ def main() -> None:
                                 placeholder="e.g. What has changed for first-line EGFR-mutant metastatic NSCLC "
                                             "since the 2024 ESMO guideline update?")
         st.caption(f":material/lock: {NO_IDENTIFIERS}")
+        g1, g2, g3 = st.columns([2, 1, 1])
+        gl_name = g1.text_input("Guideline baseline (optional)", placeholder="e.g. NCCN NSCLC",
+                                help="The guideline you are comparing against. It is never fetched; you supply it.")
+        gl_version = g2.text_input("Version", placeholder="e.g. v3.2025")
+        gl_date = g3.text_input("Version date", placeholder="YYYY-MM-DD")
         auto_start = st.checkbox("Start research automatically", value=False,
                                  help="Skip the plan review and start searching as soon as the plan is ready. "
                                       "Clarifying questions still stop the run.")
@@ -320,7 +346,8 @@ def main() -> None:
         llm, search = default_clients(settings)
         with st.spinner("Writing the research brief and search plan…"):
             try:
-                report = asyncio.run(prepare(question, llm=llm, search=search, conn=conn, settings=settings))
+                report = asyncio.run(prepare(question, llm=llm, search=search, conn=conn, settings=settings,
+                                             guideline={"name": gl_name, "version": gl_version, "date": gl_date}))
             except IdentifierError as exc:
                 st.error(str(exc))
                 return

@@ -93,7 +93,8 @@ def find_number_support(ctx: RunContext, claim: dict, max_sentences: int = 3) ->
 def _as_item(claim: dict, text: str | None, sentence_ids: list[str]) -> Item:
     return Item(text=text or claim["text"], claim_type=claim["claim_type"], sentence_ids=sentence_ids,
                 date=claim.get("item_date"), evidence_level=claim.get("evidence_level") or "not stated",
-                population=claim.get("population"))
+                population=claim.get("population"), change_type=claim.get("change_type") or "other",
+                impact=claim.get("impact"))
 
 
 async def _log(ctx: RunContext, claim: dict, round_: int, action: str, detail: str, level: str = "info", res=None):

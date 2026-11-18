@@ -39,6 +39,7 @@ class RunContext:
     search: SearchBackend
     on_event: EventCallback | None = None
     ids: Any = None  # identifier resolver (backends.identifiers.Resolver)
+    structured: Any = None  # backends.structured.Structured: PubMed/PMC, ClinicalTrials.gov, openFDA, Crossref
     prompt_version: str = PROMPT_VERSION
     started: float = field(default_factory=time.monotonic)
     credits_used: float = 0.0

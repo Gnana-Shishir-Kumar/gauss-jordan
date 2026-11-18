@@ -6,6 +6,7 @@ Plain async functions; no UI or web framework code. State is persisted after eve
 from __future__ import annotations
 
 import asyncio
+import re
 import sqlite3
 from datetime import date
 from typing import Any
@@ -18,9 +19,13 @@ from ..config import Settings
 from ..privacy import check_question
 from ..prompts import PROMPT_VERSION
 from ..backends.identifiers import IdentifierResolver
+from ..backends.structured import Structured
 from ..render import SUPPORTING, format_answer, is_flagged
 from ..retry import is_transient
+from ..render import COMPANY_REPORTED, PRELIMINARY
 from ..sources import is_peer_reviewed, is_preliminary
+from . import numbers
+from .conflicts import detect as detect_conflicts
 from .brief import make_brief
 from .context import EventCallback, RunContext, describe_error
 from .coverage import assess_coverage
@@ -31,6 +36,34 @@ from .verifier import verify_claims
 from .writer import persist_draft, settle_bottom_line, verified_items, write_draft
 
 STOP_REASONS = ("coverage_complete", "no_new_evidence", "quota_reached", "time_budget")
+# An efficacy result: endpoint words plus at least one non-date number in the claim.
+_EFFICACY_RE = re.compile(
+    r"\b(?:PFS|OS|ORR|DFS|EFS|RFS|MFS|DoR|DCR|pCR|CR rate|survival|response rate|responses?|remission|hazard ratio|"
+    r"HR|odds ratio|risk of (?:death|progression|recurrence)|progression|recurrence|efficacy|benefit)\b", re.I)
+
+
+def is_efficacy_number(text: str) -> bool:
+    return bool(_EFFICACY_RE.search(text or "")) and any(q.kind != "date" for q in numbers.quantities(text))
+
+
+def tier_rules(claim: dict) -> tuple[list[str], bool, str | None]:
+    """Code-enforced tier rules for one verified claim: (labels, make_uncertain, reason).
+      - any tier 3 support -> labelled preliminary;
+      - only tier 4 support -> uncertain; if the claim states an efficacy number it is labelled company-reported,
+        not peer-reviewed (a press release or news report can never be the only support for an efficacy number)."""
+    supporting = [x for x in claim["citations"] if x.get("verdict") in SUPPORTING]
+    labels, uncertain, why = [], False, None
+    tiers = {x.get("trust_tier") for x in supporting}
+    if 3 in tiers:
+        labels.append(PRELIMINARY)
+    if supporting and tiers <= {4}:
+        uncertain = True
+        if is_efficacy_number(claim["text"]):
+            labels.append(COMPANY_REPORTED)
+            why = "efficacy number supported only by tier 4 sources (press release / news): company-reported"
+        else:
+            why = "supported only by tier 4 sources (press release / news)"
+    return labels, uncertain, why
 
 
 def default_clients(settings: Settings) -> tuple[LLMClient, SearchBackend]:
@@ -53,13 +86,13 @@ def load_report(conn: sqlite3.Connection, task_id: int) -> dict[str, Any]:
     }
 
 
-def _ctx(conn, task_id, settings, llm, search, on_event, ids=None) -> RunContext:
-    return RunContext(conn, task_id, settings, llm, search, on_event, ids=ids)
+def _ctx(conn, task_id, settings, llm, search, on_event, ids=None, structured=None) -> RunContext:
+    return RunContext(conn, task_id, settings, llm, search, on_event, ids=ids, structured=structured)
 
 
 async def prepare(question: str, *, llm: LLMClient, search: SearchBackend, conn: sqlite3.Connection,
                   settings: Settings, on_event: EventCallback | None = None, today: date | None = None,
-                  ids: Any = None) -> dict:
+                  ids: Any = None, structured: Any = None, guideline: dict | None = None) -> dict:
     """Brief + plan. Ends in awaiting_approval, needs_clarification or failed.
 
     Raises privacy.IdentifierError (before anything is stored) if the question looks like it has identifiers."""
@@ -71,7 +104,7 @@ async def prepare(question: str, *, llm: LLMClient, search: SearchBackend, conn:
     ctx = _ctx(conn, task_id, settings, llm, search, on_event)
     await ctx.emit("start", f"Task {task_id}", detail={"models": settings.model_ids()})
     try:
-        brief = await make_brief(ctx, question, today)
+        brief = await make_brief(ctx, question, today, guideline)
         if brief.get("needs_clarification"):
             await ctx.emit("brief", f"Clarifying question: {brief.get('clarifying_question')}", level="warning")
             return load_report(conn, task_id)
@@ -87,16 +120,19 @@ async def prepare(question: str, *, llm: LLMClient, search: SearchBackend, conn:
 
 
 async def run(task_id: int, *, llm: LLMClient, search: SearchBackend, conn: sqlite3.Connection, settings: Settings,
-              on_event: EventCallback | None = None, ids: Any = None) -> dict:
+              on_event: EventCallback | None = None, ids: Any = None, structured: Any = None) -> dict:
     """Research, write, verify and repair an approved task. Never raises for API failures.
 
-    ids: identifier resolver for verifier gate 2; defaults to the live PubMed/ClinicalTrials.gov/Crossref resolver."""
+    ids: identifier resolver for verifier gate 2; defaults to the live PubMed/ClinicalTrials.gov/Crossref resolver.
+    structured: PubMed/PMC, ClinicalTrials.gov, openFDA, Crossref backends; defaults to the live ones."""
     task = storage.get_task(conn, task_id)
     if not task or task["status"] != "awaiting_approval":
         raise ValueError(f"task {task_id} is not awaiting approval")
     if ids is None:
         ids = IdentifierResolver.from_settings(conn, settings)
-    ctx = _ctx(conn, task_id, settings, llm, search, on_event, ids)
+    if structured is None:
+        structured = Structured.from_settings(settings)
+    ctx = _ctx(conn, task_id, settings, llm, search, on_event, ids, structured)
     storage.update_task(conn, task_id, status="researching")
     await ctx.emit("approval", "Approved; research started")
     try:
@@ -119,14 +155,17 @@ def can_resume(conn: sqlite3.Connection, task_id: int) -> bool:
 
 
 async def resume(task_id: int, *, llm: LLMClient, search: SearchBackend, conn: sqlite3.Connection,
-                 settings: Settings, on_event: EventCallback | None = None, ids: Any = None) -> dict:
+                 settings: Settings, on_event: EventCallback | None = None, ids: Any = None,
+                 structured: Any = None) -> dict:
     """Re-run writing, verification and repair for a task that failed after research, reusing its stored evidence
     (no new research calls; repair still has its reserved Tavily quota). Earlier claims of the task are discarded."""
     if not can_resume(conn, task_id):
         raise ValueError(f"task {task_id} cannot be resumed (it must have failed after research finished)")
     if ids is None:
         ids = IdentifierResolver.from_settings(conn, settings)
-    ctx = _ctx(conn, task_id, settings, llm, search, on_event, ids)
+    if structured is None:
+        structured = Structured.from_settings(settings)
+    ctx = _ctx(conn, task_id, settings, llm, search, on_event, ids, structured)
     task = storage.get_task(conn, task_id)
     storage.delete_claims(conn, task_id)
     storage.update_task(conn, task_id, status="writing", error=None, finished_at=None)
@@ -165,7 +204,9 @@ async def _patient(ctx: RunContext, step: str, fn):
 async def run_all(question: str, **kw: Any) -> dict:
     """prepare + run without a pause (CLI --yes, evals)."""
     today = kw.pop("today", None)
-    report = await prepare(question, today=today, **{k: v for k, v in kw.items() if k != "ids"})
+    guideline = kw.pop("guideline", None)
+    report = await prepare(question, today=today, guideline=guideline,
+                           **{k: v for k, v in kw.items() if k not in ("ids", "structured")})
     if report["task"]["status"] != "awaiting_approval":
         return report
     return await run(report["task"]["id"], **kw)
@@ -256,19 +297,33 @@ async def _finalize(ctx: RunContext, brief: dict, draft) -> tuple[str, str]:
     conn, tid = ctx.conn, ctx.task_id
     for c in storage.get_claims(conn, tid, include_deleted=False):
         supporting = [x for x in c["citations"] if x.get("verdict") in SUPPORTING]
-        fields: dict[str, Any] = {"peer_reviewed": int(any(is_peer_reviewed(x.get("source_type")) for x in supporting))}
-        if supporting and all(x.get("trust_tier") == 3 for x in supporting) and c["claim_type"] != "uncertain":
+        labels, uncertain, why = tier_rules(c)
+        fields: dict[str, Any] = {"peer_reviewed": int(any(is_peer_reviewed(x) for x in supporting)),
+                                  "labels": sorted(set(c.get("labels") or []) | set(labels))}
+        if uncertain and c["claim_type"] != "uncertain":
             fields["claim_type"] = "uncertain"
-            await ctx.emit("check", f"Claim {c['position'] + 1}: supported only by tier 3 sources; marked uncertain",
-                           level="warning", detail={"claim_id": c["id"]})
+        if why:
+            await ctx.emit("check", f"Claim {c['position'] + 1}: {why}; marked uncertain", level="warning",
+                           detail={"claim_id": c["id"], "rule": "tier", "labels": labels})
         storage.update_claim(conn, c["id"], **fields)
 
+    claims = storage.get_claims(conn, tid, include_deleted=False)
+    conflicts = detect_conflicts(claims)
+    for k in conflicts:
+        for cid in k["claims"]:
+            c = next(c for c in claims if c["id"] == cid)
+            storage.update_claim(conn, cid, conflict_with=(c.get("conflict_with") or []) + [
+                {"endpoint": k["endpoint"], "evidence_ids": [s["evidence_id"] for s in k["sides"]]}])
+        await ctx.emit("check", f"Sources disagree on {k['endpoint']} for {k['subject']}: "
+                       + " vs ".join(f"{s['value']} (E{s['evidence_id']}, tier {s['tier']})" for s in k["sides"])
+                       + "; both shown", level="warning", detail={"rule": "conflict", **k})
     claims = storage.get_claims(conn, tid, include_deleted=False)
     bl = await settle_bottom_line(ctx, brief, draft, claims)
     if bl:
         strong = any(x.get("verdict") == "supported" and x.get("trust_tier") in (1, 2)
-                     and not is_preliminary(x.get("source_type")) for c in claims for x in c["citations"])
-        caveat = any(is_flagged(c) for c in claims if c["citations"]) or any(c["section"] == "conflict" for c in claims)
+                     and not is_preliminary(x) for c in claims for x in c["citations"])
+        caveat = (any(is_flagged(c) for c in claims if c["citations"]) or bool(conflicts)
+                  or any(c["section"] == "conflict" for c in claims))
         base = (bl.get("reason") or "").strip().rstrip(".")
         base = f"{base}. " if base else ""
         if not strong and bl["confidence"] != "low":
@@ -283,7 +338,7 @@ async def _finalize(ctx: RunContext, brief: dict, draft) -> tuple[str, str]:
         note = "none of the developments could be verified against their cited sources."
     answer = {"bottom_line": bl, "not_established": draft.not_established,
               "check_before_acting": draft.check_before_acting, "sufficient": draft.sufficient,
-              "insufficiency_note": note}
+              "insufficiency_note": note, "conflicts_detected": conflicts}
     storage.update_task(conn, tid, answer_json=answer)
     status = "done" if (draft.sufficient and verified) else "insufficient_evidence"
     return status, format_answer(storage.get_task(conn, tid), storage.get_claims(conn, tid), answer)

@@ -16,18 +16,21 @@ Raw page text never leaves this step: the planner, coverage check and writer onl
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
 from .. import prompts, storage
 from ..backends import cache
+from ..backends.identifiers import ids_in_text, ids_in_url, title_matches
 from ..backends.search_base import SearchHit
+from ..backends.structured import drug_names
 from ..evidence import content_hash, domain_of, normalize_url, relevance
 from ..retry import with_retry
 from ..schemas import WorkerNotes, parse_partial_date
 from ..sentences import parse_ref, select, split_sentences
-from ..sources import classify, domains_for, tier_of
+from ..sources import assign_tier, classify, domains_for, tier_of
 from . import numbers
 from .context import RunContext, describe_error
 
@@ -186,12 +189,57 @@ async def _extract_batch(ctx: RunContext, by_raw: dict[str, str], depth: str, ph
     return got, bad
 
 
+async def _structured_fetch(ctx: RunContext, picks: list[Pick]) -> tuple[dict[str, tuple[str, str]], list[Pick]]:
+    """PubMed / PMC / ClinicalTrials.gov URLs are read from their APIs (ground truth), not scraped. Returns the pages
+    fetched and the picks left for Tavily (other URLs, or API quota spent / API failure)."""
+    pages: dict[str, tuple[str, str]] = {}
+    rest: list[Pick] = []
+    for p in picks:
+        backend = ctx.structured.for_url(p.url) if ctx.structured is not None else None
+        if backend is None:
+            rest.append(p)
+            continue
+        if not ctx.take(backend.api, "research"):
+            await ctx.emit("extract", f"{backend.api} quota reached; {p.url} goes to Tavily Extract", level="warning")
+            rest.append(p)
+            continue
+        t0 = time.perf_counter()
+        res = await backend.extract([p.hit.url])
+        text = next(iter(res.pages.values()), None)
+        if text:
+            pages[p.url] = (text, f"{backend.name}_api")
+            await ctx.emit("extract", f"Read {p.url} from the {backend.name} API", latency_ms=_ms(t0),
+                           detail={"url": p.url, "api": backend.name})
+        else:
+            await ctx.emit("extract", f"{backend.name} API had no record for {p.url}: "
+                           f"{next(iter(res.failed.values()), 'empty')}; trying Tavily Extract", level="warning")
+            rest.append(p)
+    return pages, rest
+
+
+async def _pmc_fallback(ctx: RunContext, p: Pick) -> str | None:
+    """Article page that Tavily could not extract: full text from PubMed Central if the article is there."""
+    pubmed = getattr(ctx.structured, "pubmed", None)
+    ids = [i for i in ids_in_url(p.url) if i.kind in ("doi", "pmid")]
+    if pubmed is None or not ids or not ctx.take("pubmed", "research", 2):
+        return None
+    try:
+        pmcid = await pubmed.pmc_for(ids[0].kind, ids[0].value)
+        return await pubmed.pmc_text(pmcid) if pmcid else None
+    except Exception as exc:  # noqa: BLE001 - the gap is recorded by the caller
+        await ctx.emit("extract", f"PubMed Central fallback failed for {p.url}: {describe_error(exc)}",
+                       level="warning")
+        return None
+
+
 async def fetch_pages(ctx: RunContext, picks: list[Pick], phase: str = "research"
                       ) -> tuple[dict[str, tuple[str, str]], dict[str, str]]:
     """Full text per normalized URL: {url: (text, fetched_via)}, plus {url: error} for coverage gaps.
 
-    Cache first (raw text already stored within the TTL). Then batched basic extraction; failed_results are retried
-    once with advanced extraction; whatever still fails is a coverage gap (source_unavailable)."""
+    Cache first (raw text already stored within the TTL). PubMed, PubMed Central and ClinicalTrials.gov URLs are read
+    from their APIs. Everything else goes through batched basic Tavily extraction; failed_results are retried once
+    with advanced extraction, then articles fall back to PubMed Central full text; whatever still fails is a
+    coverage gap (source_unavailable)."""
     lim = ctx.settings.limits
     urls = [p.url for p in picks]
     pages = {u: (t, "cache") for u, t in storage.cached_texts(ctx.conn, urls, ctx.settings.cache_ttl_days).items()}
@@ -199,7 +247,8 @@ async def fetch_pages(ctx: RunContext, picks: list[Pick], phase: str = "research
         await ctx.emit("extract", f"Cache hit: {len(pages)} pages reused", credits=0.0,
                        detail={"cached_urls": sorted(pages)})
     failed: dict[str, str] = {}
-    todo = [p for p in picks if p.url not in pages]
+    api_pages, todo = await _structured_fetch(ctx, [p for p in picks if p.url not in pages])
+    pages.update(api_pages)
     for i in range(0, len(todo), lim.extract_batch_size):
         batch = todo[i: i + lim.extract_batch_size]
         got, bad = await _extract_batch(ctx, {p.hit.url: p.url for p in batch}, "basic", phase)
@@ -213,7 +262,15 @@ async def fetch_pages(ctx: RunContext, picks: list[Pick], phase: str = "research
             failed.pop(u, None)
         for u, e in bad.items():
             failed[u] = f"{failed.get(u, '')}; advanced: {e}".strip("; ")
-    # Next fallback for articles (PubMed Central full text) plugs in here; until then the failure is a coverage gap.
+    for p in [p for p in todo if p.url in failed and not failed[p.url].startswith("skipped")]:
+        text = await _pmc_fallback(ctx, p)
+        if text:
+            pages[p.url] = (text, "pubmed_central")
+            failed.pop(p.url, None)
+            await ctx.emit("extract", f"Used PubMed Central full text for {p.url} after extraction failed",
+                           detail={"url": p.url})
+        else:
+            failed[p.url] = f"{failed[p.url]}; no PubMed Central full text"
     return pages, failed
 
 
@@ -266,6 +323,46 @@ def store_picks(ctx: RunContext, brief: dict, query: str, picks: list[Pick], pag
         else:
             dropped[reason] += 1
     return kept, dropped
+
+
+async def add_fda_companions(ctx: RunContext, sq_id: int, kept: list[int], state: ResearchState,
+                             phase: str = "research") -> list[int]:
+    """For each kept FDA page, add the Drugs@FDA (openFDA) approval history of the drugs it names as its own tier 1
+    evidence, so approval dates come from FDA's records rather than from page or search metadata."""
+    openfda = getattr(ctx.structured, "openfda", None)
+    if openfda is None:
+        return []
+    out: list[int] = []
+    for r in storage.get_evidence(ctx.conn, ctx.task_id, ids=kept):
+        if r.get("source_type") != "regulatory_action" or "fda.gov" not in (r.get("domain") or ""):
+            continue
+        for name in drug_names(f"{r.get('title') or ''} {r.get('excerpt') or ''}")[:2]:
+            url = openfda.approvals_url(name)
+            if url in state.seen_urls:
+                continue
+            if not ctx.take("openfda", phase):
+                await ctx.emit("extract", "openFDA quota reached; approval records not added", level="warning")
+                return out
+            state.seen_urls.add(url)
+            t0 = time.perf_counter()
+            res = await openfda.extract([url])
+            text = next(iter(res.pages.values()), None)
+            if not text:
+                await ctx.emit("extract", f"No Drugs@FDA record for {name}", level="info", latency_ms=_ms(t0))
+                continue
+            src = storage.upsert_source(ctx.conn, url, "api.fda.gov", f"Drugs@FDA approvals: {name}", None,
+                                        content_hash(text), 1, "regulatory_action")
+            sentences = _store_text(ctx, src, text, "openfda_api")
+            shown = list(range(1, min(len(sentences), ctx.settings.limits.sentences_per_source) + 1))
+            dates = sorted(re.findall(r"approved on (\d{4}-\d{2}-\d{2})", text), reverse=True)
+            if dates:
+                storage.set_source_date(ctx.conn, src, dates[0], "Drugs@FDA approval date (latest)")
+            eid = storage.add_evidence(ctx.conn, ctx.task_id, sq_id, src, "\n".join(sentences[i - 1] for i in shown),
+                                       1.0, True, None, dates[0] if dates else None, shown)
+            out.append(eid)
+            await ctx.emit("extract", f"Added Drugs@FDA approval history for {name} (E{eid})", latency_ms=_ms(t0),
+                           detail={"evidence_id": eid, "url": url, "api": "openfda"})
+    return out
 
 
 async def take_notes(ctx: RunContext, brief: dict, sq_id: int | None, query: str, rows: list[dict],
@@ -379,6 +476,7 @@ async def research_round(ctx: RunContext, brief: dict, queries: list[tuple[int, 
     for w in workers:  # plan order, so dedupe is deterministic
         picks = by_worker.get(w.sq_id, [])
         kept, dropped = store_picks(ctx, brief, w.query, picks, pages, failed, state)
+        kept += await add_fda_companions(ctx, w.sq_id, kept, state)
         kept_rows[w.sq_id] = kept
         if picks:
             await ctx.emit("evidence", f"Kept {len(kept)}/{len(picks)} for '{w.query}'",
@@ -390,6 +488,8 @@ async def research_round(ctx: RunContext, brief: dict, queries: list[tuple[int, 
                    note_sem)
         for w in workers if kept_rows.get(w.sq_id)
     ))
+    await settle_sources(ctx, storage.get_evidence(ctx.conn, ctx.task_id,
+                                                   ids=[i for ids in kept_rows.values() for i in ids]))
 
     kept_by_sq = {w.sq_id: len(kept_rows.get(w.sq_id, [])) for w in workers}
     for w in workers:
@@ -412,10 +512,87 @@ async def targeted_search(ctx: RunContext, brief: dict, query: str, state: Resea
     final = _select(ctx, [w], state, lim.repair_extract_per_search, lim.repair_extract_per_search)
     pages, failed = await fetch_pages(ctx, final, phase="repair")
     kept, dropped = store_picks(ctx, brief, query, final, pages, failed, state)
+    kept += await add_fda_companions(ctx, sq_id, kept, state, phase="repair")
     await ctx.emit("evidence", f"Repair search kept {len(kept)}/{len(final)} for '{query}'",
                    detail={"sub_query_id": sq_id, "dropped": dict(dropped), "phase": "repair"})
     if kept:
         await take_notes(ctx, brief, sq_id, query, storage.get_evidence(ctx.conn, ctx.task_id, ids=kept),
                          asyncio.Semaphore(1))
+        await settle_sources(ctx, storage.get_evidence(ctx.conn, ctx.task_id, ids=kept))
     storage.update_sub_query(ctx.conn, sq_id, "done" if kept else "weak")
     return kept
+
+
+# --- trust tiers and dates from the source -------------------------------------------
+
+_MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov",
+                                       "dec"], 1)}
+
+
+def pubmed_date(data: dict) -> str | None:
+    """PubMed's sort date ('2024/10/09 00:00'), else its publication date ('2024 Oct 9', '2024 Oct', '2024')."""
+    s = (data or {}).get("sortpubdate") or ""
+    if m := re.match(r"(\d{4})/(\d{2})/(\d{2})", s):
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    for key in ("epubdate", "pubdate"):
+        s = (data or {}).get(key) or ""
+        if m := re.match(r"(\d{4})(?:\s+([A-Za-z]{3})[a-z]*(?:\s+(\d{1,2}))?)?", s):
+            y, mon, d = m.group(1), m.group(2), m.group(3)
+            if mon and mon.lower() in _MONTHS:
+                return f"{y}-{_MONTHS[mon.lower()]:02d}" + (f"-{int(d):02d}" if d else "")
+            return y
+    return None
+
+
+def date_from_resolution(r) -> tuple[str | None, str | None]:
+    """(date, where it came from) for a resolved identifier: PubMed publication date, ClinicalTrials.gov last update
+    posted, or Crossref's published date."""
+    if r is None or r.status != "found":
+        return None, None
+    if r.ident.kind == "pmid":
+        return pubmed_date(r.data), "pubmed"
+    if r.ident.kind == "nct":
+        return r.data.get("last_update_posted"), "clinicaltrials.gov last update posted"
+    if r.ident.kind == "doi":
+        return r.data.get("issued"), "crossref"
+    return None, None
+
+
+async def settle_sources(ctx: RunContext, rows: list[dict]) -> None:
+    """After notes: confirm identifiers, then set each kept source's trust tier and its date from the source itself.
+
+    A journal page becomes tier 2 only if its PMID or DOI resolves to the same title; otherwise it is tier 4. Dates
+    come from PubMed, ClinicalTrials.gov or Crossref when an identifier resolves; Tavily's published_date stays only
+    a hint (evidence_date) and is never written as the source date."""
+    for r in rows:
+        src = storage.get_source(ctx.conn, r["source_id"]) or {}
+        stype = src.get("source_type")
+        idents = ids_in_url(src.get("url") or "")
+        if not idents and stype == "peer_reviewed_article":
+            head = (src.get("raw_text") or "")[:4000]
+            idents = [i for i in ids_in_text(head) if i.kind in ("pmid", "doi")][:1]
+        if not idents and stype == "registry_entry":
+            idents = [i for i in ids_in_text((src.get("raw_text") or "")[:2000]) if i.kind == "nct"][:1]
+        status, title, ident = ("no_identifier", None, None)
+        res = None
+        if idents and ctx.ids is not None:
+            ident = idents[0]
+            res = await ctx.ids.resolve(ident, take=lambda api: ctx.take(api, "verify"))
+            if res.status == "found":
+                ok = title_matches(res.title, src.get("title"), (src.get("raw_text") or "")[:3000])
+                status, title = ("confirmed" if ok else "title_mismatch"), res.title
+            else:
+                status = res.status
+        elif idents:
+            status, ident = "skipped", idents[0]
+        tier = assign_tier(stype, status)
+        storage.set_source_trust(ctx.conn, r["source_id"], trust_tier=tier, id_status=status,
+                                 identifier=str(ident) if ident else None, id_title=title)
+        date, where = date_from_resolution(res) if status == "confirmed" or (res and stype == "registry_entry"
+                                                                              and res.status == "found") else (None, None)
+        if date:
+            storage.set_source_date(ctx.conn, r["source_id"], date, where)
+        if stype == "peer_reviewed_article" and tier != 2:
+            await ctx.emit("tier", f"E{r['id']}: journal page kept at tier 4: identifier {status.replace('_', ' ')}",
+                           level="warning", detail={"evidence_id": r["id"], "url": src.get("url"), "id_status": status,
+                                                    "identifier": str(ident) if ident else None})

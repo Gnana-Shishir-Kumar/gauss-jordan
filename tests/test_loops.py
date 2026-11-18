@@ -41,7 +41,7 @@ def test_follow_up_round_uses_advanced_depth_and_tier_3(agent, conn):
     assert [s["text"] for s in round2] == ["drugx overall survival update 2025"] and round2[0]["depth"] == "advanced"
     call = next(c for c in search.search_calls if c["query"] == round2[0]["text"])
     assert call["depth"] == "advanced" and "onclive.com" in call["include_domains"]
-    assert any(e["domain"] == "onclive.com" and e["trust_tier"] == 3 for e in r["evidence"])
+    assert any(e["domain"] == "onclive.com" and e["trust_tier"] == 4 for e in r["evidence"])
     assert r["task"]["stop_reason"] == "coverage_complete"
 
 

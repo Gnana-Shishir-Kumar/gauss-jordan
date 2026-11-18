@@ -21,7 +21,7 @@ def task_counts(report: dict, expect_insufficient: bool) -> dict:
     numeric = [t["detail"] for t in report["trace"]
                if t["step"] == "check" and t["detail"].get("gate") == "numbers"
                and t["detail"].get("phase") == "initial" and t["detail"].get("status") != "n/a"]
-    prelim = [c for c in claims if any(is_preliminary(x.get("source_type")) for x in c["citations"])]
+    prelim = [c for c in claims if any(is_preliminary(x) for x in c["citations"])]
     status = report["task"]["status"]
     return {
         "supported_citations": sum(x["verdict"] == "supported" for x in cits),

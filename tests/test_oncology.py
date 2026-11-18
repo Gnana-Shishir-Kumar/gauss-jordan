@@ -9,12 +9,13 @@ from conftest import (POPULATION, TODAY, FakeLLM, FakeSearch, active, good_item,
 
 from research_agent import storage
 
+
 from research_agent.engine.checks import POPULATION_NOT_STATED
 from research_agent.exports import to_csv, to_ris
 from research_agent.privacy import IdentifierError
 
 
-def test_tier_3_only_claim_is_tagged_uncertain(agent, conn):
+def test_tier_4_only_efficacy_claim_tagged_company_reported_and_uncertain(agent, conn):
     calls = []
 
     def coverage(call):
@@ -35,39 +36,58 @@ def test_tier_3_only_claim_is_tagged_uncertain(agent, conn):
                       score=0.9)]
     r = agent.full(FakeLLM(conn, Coverage=coverage, Draft=draft), FakeSearch(results={"drugx response rate news": news}))
     c = r["claims"][0]
-    assert c["citations"][0]["trust_tier"] == 3 and c["citations"][0]["verdict"] == "supported"
-    assert c["claim_type"] == "uncertain"
+    assert c["citations"][0]["trust_tier"] == 4 and c["citations"][0]["verdict"] == "supported"
+    assert c["claim_type"] == "uncertain" and "company-reported, not peer-reviewed" in c["labels"]
     assert c["citations"][0]["source_type"] == "news"
-    assert "Tier 3" in r["task"]["final_answer"]
+    assert "Tier 4" in r["task"]["final_answer"] and "COMPANY-REPORTED" in r["task"]["final_answer"]
     assert r["task"]["answer_json"]["bottom_line"]["confidence"] == "low"  # no tier 1-2 support
 
 
-def test_login_blocked_guideline_page(agent, conn):
-    blocked = "https://www.nccn.org/drugx-egfr-nsclc-fda-approval"
-    search = FakeSearch(domains=("nccn.org", "fda.gov", "nejm.org"), login_blocked=(blocked,))
+def test_nccn_is_never_searched_or_fetched(agent, conn):
+    """NCCN's terms prohibit automated access: it is not on the allowlist, and a leaked NCCN result is dropped."""
+    from research_agent.backends.search_base import SearchHit
+
+    class Leaky(FakeSearch):
+        async def search(self, query, **kw):
+            res = await super().search(query, **kw)
+            res.hits.append(SearchHit(url="https://www.nccn.org/guidelines/x", title="NCCN", content=query, score=0.99))
+            return res
+
+    search = Leaky()
+    r = agent.full(FakeLLM(conn), search)
+    assert all("nccn.org" not in d for c in search.search_calls for d in c["include_domains"])
+    assert all("nccn.org" not in u for batch in search.extract_calls for u in batch)
+    nccn = [e for e in r["evidence"] if "nccn.org" in e["url"]]
+    assert nccn and all(not e["kept"] and e["drop_reason"] == "off_allowlist" for e in nccn)
+
+
+def test_tier_3_claim_is_always_labelled_preliminary(agent, conn):
+    """Conference abstracts are searched only in follow-up rounds and are always shown as PRELIMINARY."""
+    from research_agent.backends.search_base import SearchHit
+    abstract = "https://meetings.asco.org/abstracts-presentations/drugx-egfr-nsclc"
+    q = "drugx asco abstract update"
+    hits = {q: [SearchHit(url=abstract, title="Drugx abstract", content="drugx egfr nsclc abstract", score=0.95)]}
+    calls = []
+
+    def coverage(call):
+        calls.append(1)
+        if len(calls) == 1:
+            return {"aspects": [{"aspect": "phase 3 trial results", "status": "thin"}], "follow_up_queries": [q]}
+        return h_coverage_complete(call)
 
     def draft(call):
-        eid = conn.execute("""SELECT e.id FROM evidence e JOIN sources s ON s.id = e.source_id
-                              WHERE s.domain = 'nccn.org' AND e.kept = 0""").fetchone()[0]
-        good = num_notes(call.llm.conn)[0]
+        conn_ = call.llm.conn
+        note = next(n for n in num_notes(conn_) if any(
+            e["url"] == abstract.replace("https://", "https://") for e in storage.get_evidence(
+                conn_, latest_task(conn_), ids=n["evidence_ids"])))
         return {"sufficient": True, "bottom_line": {"text": "b", "confidence": "moderate", "reason": "r"},
-                "items": [good_item(call.llm.conn, good),
-                          {"text": "NCCN updated its first-line recommendation.", "claim_type": "fact",
-                           "sentence_ids": [f"E{eid}-1"]}]}
+                "items": [good_item(conn_, note)]}
 
-    # The blocked page has no stored sentences, so the citation is rejected; repair deletes the claim.
-    r = agent.full(FakeLLM(conn, Draft=draft, RepairAction=lambda c: {"action": "delete", "reason": "no source"}),
-                   search)
-    ev = next(e for e in r["evidence"] if e["url"] == "https://nccn.org/drugx-egfr-nsclc-fda-approval")
-    assert not ev["kept"] and ev["drop_reason"].startswith("source_unavailable") and "login" in ev["drop_reason"]
-    assert ev["source_type"] == "guideline" and ev["trust_tier"] == 1
-    # The blocked page never counts as support for any claim.
-    assert all(x["evidence_id"] != ev["id"] for c in r["claims"] for x in c["citations"])
-    nccn = next(c for c in r["claims"] if c["text"].startswith("NCCN"))
-    assert nccn["status"] == "deleted" and nccn["rejected"][0]["reason"] == "sentence ID not in the evidence store"
-    assert r["task"]["status"] == "done"  # the run continued with the other sources
-
-
+    r = agent.full(FakeLLM(conn, Coverage=coverage, Draft=draft), FakeSearch(results=hits))
+    claim = active(r)[0]
+    assert claim["citations"][0]["trust_tier"] == 3 and "preliminary" in claim["labels"]
+    assert claim["claim_type"] == "fact"  # preliminary, but not demoted: tier 3 is not tier 4
+    assert "PRELIMINARY" in r["task"]["final_answer"]
 
 def test_population_not_stated_when_not_in_sources(agent, conn):
     def draft(call):
@@ -156,3 +176,58 @@ def test_ris_and_csv_export(agent, conn):
     assert {"title", "url", "source_type", "date", "trust_tier"} <= set(rows[0])
     assert page_for("x")  # fixture sanity
     assert TODAY.year == 2026
+
+
+
+# --- guideline baseline and the "What changed" table --------------------------------
+
+def test_guideline_baseline_kept_only_when_user_states_it(agent, conn):
+    from conftest import h_brief
+    q = "What changed for first-line EGFR NSCLC since NCCN NSCLC v3.2025?"
+    llm = FakeLLM(conn, Brief=lambda c: h_brief(c) | {"anchor_date": None, "guideline_name": "NCCN NSCLC",
+                                                      "guideline_version": "v3.2025", "guideline_date": "2025-01-14"})
+    r = agent.prepare(llm, FakeSearch(), question=q)
+    b = r["task"]["brief"]
+    assert b["guideline_name"] == "NCCN NSCLC" and b["guideline_version"] == "v3.2025"
+    assert b["guideline_date"] is None  # the model guessed a date the user never wrote
+    llm = FakeLLM(conn, Brief=lambda c: h_brief(c) | {"guideline_name": "ESMO 2024", "guideline_version": "v9"})
+    b = agent.prepare(llm, FakeSearch())["task"]["brief"]
+    assert b["guideline_name"] is None and b["guideline_version"] is None
+    assert any("not stated in the question" in t["message"] for t in storage.get_trace(conn, 2))
+
+
+def test_user_supplied_guideline_sets_anchor(agent, conn):
+    import asyncio
+
+    from conftest import TODAY, h_brief
+    from research_agent.engine import prepare
+    llm = FakeLLM(conn, Brief=lambda c: h_brief(c) | {"anchor_date": None})
+    kw = agent.kw(llm, FakeSearch())
+    kw.pop("ids"), kw.pop("structured")
+    r = asyncio.run(prepare("What changed for first-line EGFR NSCLC?", today=TODAY,
+                            guideline={"name": "NCCN NSCLC", "version": "v3.2025", "date": "2025-01-14"}, **kw))
+    t = r["task"]
+    assert t["anchor_date"] == "2025-01-14" and not t["brief"]["anchor_defaulted"]
+    assert t["brief"]["guideline_version"] == "v3.2025"
+    from research_agent.prompts import brief_text
+    assert "NCCN NSCLC version v3.2025 dated 2025-01-14" in brief_text(t["brief"])
+
+
+def test_what_changed_table_and_impact_interpretation(agent, conn):
+    from conftest import h_draft
+
+    def draft(call):
+        d = h_draft(call)
+        d["items"][0].update(change_type="trial readout", impact="May support drugx as a first-line option.")
+        d["items"][1].update(change_type="new approval", impact="Could change care for 45% of patients.")
+        return d
+
+    r = agent.full(FakeLLM(conn, Draft=draft), FakeSearch())
+    claims = active(r)
+    assert sorted(c["change_type"] for c in claims) == ["new approval", "new trial data"]
+    assert sorted(bool(c["impact"]) for c in claims) == [False, True]  # the invented 45% note was dropped
+    ans = r["task"]["final_answer"]
+    assert "| Change | Date | Evidence level | Tier | Review status | Verified | Practice impact (interpretation) |" in ans
+    assert "| new trial data | 2025-06-01 | phase 3 randomized trial |" in ans
+    assert "Practice impact (interpretation, not a finding): May support drugx" in ans
+    assert any("practice-impact note states numbers" in t["message"] for t in r["trace"])

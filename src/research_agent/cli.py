@@ -57,6 +57,9 @@ def main(argv: list[str] | None = None) -> int:
                                 + USE_LIMITS)
     p.add_argument("question", nargs="?", help="clinical topic question (no patient identifiers)")
     p.add_argument("--yes", "-y", action="store_true", help="skip the approval step")
+    p.add_argument("--guideline", help='guideline baseline you are comparing against, e.g. "NCCN NSCLC" (never fetched)')
+    p.add_argument("--guideline-version", help='e.g. "v3.2025"')
+    p.add_argument("--guideline-date", help="YYYY-MM-DD; used as the anchor date if the question gives none")
     p.add_argument("--run", type=int, metavar="TASK_ID", help="approve and run a prepared task")
     p.add_argument("--resume", type=int, metavar="TASK_ID",
                    help="re-run writing and verification for a task that failed after research")
@@ -109,7 +112,8 @@ def main(argv: list[str] | None = None) -> int:
         task_id = args.run
     else:
         try:
-            report = asyncio.run(prepare(args.question, **kw))
+            guideline = {"name": args.guideline, "version": args.guideline_version, "date": args.guideline_date}
+            report = asyncio.run(prepare(args.question, guideline=guideline, **kw))
         except IdentifierError as exc:
             print(str(exc), file=sys.stderr)
             return 6

@@ -12,25 +12,33 @@ from pathlib import Path
 
 NEBIUS_BASE_URL = "https://api.tokenfactory.nebius.com/v1"
 
-# Source allowlist by trust tier. Subdomains match (meetings.asco.org -> asco.org).
+# Search allowlist, grouped by the tier a domain's pages USUALLY get. These groups only decide which domains a search
+# round may hit (Tavily include_domains, strict). A source's actual trust tier is assigned in code from its type and
+# its identifier check (sources.assign_tier): a journal page is tier 2 only if its PMID/DOI resolves to the same title.
+# Subdomains match the longest listed domain (meetings.asco.org -> group 3, asco.org -> group 1).
+# nccn.org is deliberately absent: NCCN's terms prohibit automated access. The user supplies the guideline version.
 TIER_DOMAINS: dict[int, tuple[str, ...]] = {
-    1: (  # regulatory, registries, guidelines
-        "fda.gov", "ema.europa.eu", "clinicaltrials.gov", "cancer.gov", "nccn.org",
-        "esmo.org", "asco.org", "ncbi.nlm.nih.gov", "pubmed.ncbi.nlm.nih.gov",
+    1: (  # regulators, registries, guideline publishers
+        "fda.gov", "ema.europa.eu", "clinicaltrials.gov", "cancer.gov", "esmo.org", "asco.org",
     ),
-    2: (  # journals
-        "nejm.org", "thelancet.com", "jamanetwork.com", "ascopubs.org",
-        "annalsofoncology.org", "aacrjournals.org", "nature.com",
+    2: (  # journals and PubMed / PubMed Central
+        "nejm.org", "thelancet.com", "jamanetwork.com", "ascopubs.org", "annalsofoncology.org",
+        "aacrjournals.org", "nature.com", "ncbi.nlm.nih.gov", "pubmed.ncbi.nlm.nih.gov",
     ),
-    3: (  # oncology news and company press releases (lower trust, leads only)
+    3: (  # conference abstract hosts
+        "meetings.asco.org", "oncologypro.esmo.org", "aacr.org",
+    ),
+    4: (  # oncology news and company press releases (leads only)
         "ascopost.com", "onclive.com", "targetedonc.com", "cancernetwork.com",
         "prnewswire.com", "businesswire.com", "globenewswire.com",
     ),
 }
+BLOCKED_DOMAINS = ("nccn.org",)  # never searched or fetched
 TIER_LABELS = {
     1: "Tier 1 · regulatory / registry / guideline",
-    2: "Tier 2 · journal",
-    3: "Tier 3 · news / press release (lower trust)",
+    2: "Tier 2 · peer-reviewed journal (identifier confirmed)",
+    3: "Tier 3 · conference abstract (preliminary)",
+    4: "Tier 4 · press release / news (lower trust)",
 }
 
 
@@ -78,7 +86,7 @@ class Limits:
     max_notes_for_writer: int = 40
     max_concurrency: int = 5
     round1_tiers: tuple[int, ...] = (1, 2)
-    follow_up_tiers: tuple[int, ...] = (1, 2, 3)
+    follow_up_tiers: tuple[int, ...] = (1, 2, 3, 4)
     round1_depth: str = "advanced"  # evidence searches; planning probes would use basic
     follow_up_depth: str = "advanced"
     chunks_per_source: int = 3  # advanced search only
