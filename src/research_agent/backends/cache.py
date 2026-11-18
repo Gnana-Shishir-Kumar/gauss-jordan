@@ -1,5 +1,6 @@
-"""Cache checked before every Tavily call: search results by normalized query + params, and
-extracted pages by URL, both reused for `cache_ttl_days` (default 7)."""
+"""Search cache checked before every Tavily search: results by exact (case/space-normalized) query + params, reused
+for `cache_ttl_days` (default 7). Empty search results are never cached. Extracted pages are cached as the sources'
+stored raw text (storage.cached_texts), keyed by normalized URL."""
 
 from __future__ import annotations
 
@@ -19,17 +20,9 @@ def search_key(query: str, depth: str, domains: list[str], start_date: str | Non
 
 def get_search(conn, key: str, ttl_days: int) -> list[SearchHit] | None:
     rows = storage.get_search_cache(conn, key, ttl_days)
-    return None if rows is None else [SearchHit(**r) for r in rows]
+    return [SearchHit(**r) for r in rows] if rows else None  # empty rows (older DBs) count as a miss
 
 
 def put_search(conn, key: str, query: str, params: dict, hits: list[SearchHit]) -> None:
-    storage.put_search_cache(conn, key, query, params, [asdict(h) for h in hits])
-
-
-def get_pages(conn, urls: list[str], ttl_days: int) -> dict[str, str]:
-    return storage.get_extract_cache(conn, urls, ttl_days)
-
-
-def put_pages(conn, pages: dict[str, str]) -> None:
-    if pages:
-        storage.put_extract_cache(conn, pages)
+    if hits:  # an empty result may be a transient miss; don't pin it for a week
+        storage.put_search_cache(conn, key, query, params, [asdict(h) for h in hits])

@@ -111,11 +111,11 @@ def test_falls_back_when_json_mode_rejected():
     assert "response_format" not in comp.kwargs[1]
 
 
-def test_draft_requires_citation_for_facts():
-    with pytest.raises(ValueError):
-        Draft.model_validate({"sufficient": True, "items": [{"text": "x", "claim_type": "fact"}]})
-    d = Draft.model_validate({"sufficient": True, "items": [{"text": "x", "evidence_ids": ["E3", "[E4]", 3]}]})
-    assert d.items[0].evidence_ids == [3, 4]
+def test_draft_keeps_citations_as_strings_for_the_code_check():
+    # Validity is decided in code (writer.resolve_citations), so one bad ID never forces a full LLM retry.
+    d = Draft.model_validate({"sufficient": True, "items": [{"text": "x", "claim_type": "fact"},
+                                                            {"text": "y", "sentence_ids": ["E3-1", "[E4-2]", "N7"]}]})
+    assert d.items[0].sentence_ids == [] and d.items[1].sentence_ids == ["E3-1", "E4-2", "N7"]
 
 
 def test_tavily_backend_maps_responses_and_credits():
@@ -138,7 +138,9 @@ def test_tavily_backend_maps_responses_and_credits():
     kw = fake.search_kw
     assert kw["include_domains"] == ["fda.gov"] and kw["start_date"] == "2025-01-01"
     assert kw["search_depth"] == "advanced" and kw["max_results"] == 10 and kw["include_usage"] is True
-    ext = asyncio.run(tb.extract(["https://fda.gov/a", "https://nccn.org/b"], query="q"))
+    assert kw["auto_parameters"] is False and kw["chunks_per_source"] == 3 and kw["include_answer"] is False
+    ext = asyncio.run(tb.extract(["https://fda.gov/a", "https://nccn.org/b"]))
     assert ext.pages == {"https://fda.gov/a": "body"} and ext.failed == {"https://nccn.org/b": "403"}
-    assert ext.credits == 1  # no usage returned -> 1 credit per 5 successful URLs
-    assert fake.extract_kw["query"] == "q" and fake.extract_kw["include_usage"] is True
+    assert ext.credits == 1 and ext.estimated  # no usage returned -> 1 credit per 5 successful URLs
+    assert "query" not in fake.extract_kw and fake.extract_kw["extract_depth"] == "basic"
+    assert fake.extract_kw["include_usage"] is True

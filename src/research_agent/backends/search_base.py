@@ -19,13 +19,15 @@ class SearchHit:
 class SearchResult:
     hits: list[SearchHit] = field(default_factory=list)
     credits: float = 0.0
+    estimated: bool = False  # credits from published pricing because the API did not report usage
 
 
 @dataclass
 class ExtractResult:
     pages: dict[str, str] = field(default_factory=dict)  # url -> extracted text
-    failed: dict[str, str] = field(default_factory=dict)  # url -> error (e.g. login wall)
+    failed: dict[str, str] = field(default_factory=dict)  # url -> error (e.g. login wall), from failed_results
     credits: float = 0.0
+    estimated: bool = False
 
 
 class SearchBackend(Protocol):
@@ -34,4 +36,6 @@ class SearchBackend(Protocol):
     async def search(self, query: str, *, depth: str, max_results: int, include_domains: list[str],
                      start_date: str | None) -> SearchResult: ...
 
-    async def extract(self, urls: list[str], *, query: str | None = None) -> ExtractResult: ...
+    async def extract(self, urls: list[str], *, depth: str = "basic") -> ExtractResult:
+        """Full page text per URL (no query-based chunking: sentences are numbered from the whole page)."""
+        ...

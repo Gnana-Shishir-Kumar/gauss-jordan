@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import FakeLLM, FakeSearch, notes_with_numbers, good_item
+from conftest import FakeLLM, FakeSearch, good_item, num_notes
 
 from research_agent.metrics import aggregate, task_counts
 
@@ -55,18 +55,18 @@ def test_metrics_from_runs(agent, conn):
     good = agent.full(FakeLLM(conn), FakeSearch())
 
     def wrong_number(call):
-        n = notes_with_numbers(call.llm.conn)[0]
-        item = good_item(n) | {"text": "HR was 0.68."}
+        n = num_notes(call.llm.conn)[0]
+        item = good_item(call.llm.conn, n) | {"text": "HR was 0.68."}
         return {"sufficient": True, "bottom_line": {"text": "b", "confidence": "low", "reason": "r"}, "items": [item]}
 
-    numeric_fail = agent.full(FakeLLM(conn, Draft=wrong_number, Repair=lambda c: {"claims": []}), FakeSearch())
+    numeric_fail = agent.full(FakeLLM(conn, Draft=wrong_number, RepairAction=lambda c: {"action": "delete", "reason": "x"}), FakeSearch())
     rows = [{"counts": task_counts(good, False), "latency_s": 1.0},
             {"counts": task_counts(numeric_fail, True), "latency_s": 3.0}]
     s = aggregate(rows)
     assert s["numeric_check_pass_rate"] == pytest.approx(100 * 2 / 3, abs=0.1)  # 2 of 3 initial checks passed
     assert s["insufficient_evidence_accuracy"] == 100.0  # second run ended insufficient, as expected
     assert s["tier12_support_share"] == 100.0
-    assert s["citation_support_rate"] == pytest.approx(100 * 2 / 3, abs=0.1)
+    assert s["citation_support_rate"] == 100.0  # the unsourceable claim was deleted, not left flagged
     assert s["avg_latency_s"] == 2.0 and s["questions"] == 2
 
 

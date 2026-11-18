@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .render import SUPPORTING, evidence_label
+from .render import SUPPORTING, claim_verdict, evidence_label
 from .sources import is_preliminary
 
 RATE_KEYS = {
@@ -15,24 +15,26 @@ RATE_KEYS = {
 
 
 def task_counts(report: dict, expect_insufficient: bool) -> dict:
-    claims = [c for c in report["claims"] if c["citations"]]
+    claims = [c for c in report["claims"] if c["citations"] and c.get("status") != "deleted"]
     cits = [x for c in claims for x in c["citations"] if x.get("verdict")]
-    supported_claims = [c for c in claims if any(x.get("verdict") in SUPPORTING for x in c["citations"])]
+    supported_claims = [c for c in claims if claim_verdict(c) in SUPPORTING]
     numeric = [t["detail"] for t in report["trace"]
-               if t["step"] == "check" and t["detail"].get("numeric") and t["detail"].get("phase") == "initial"]
+               if t["step"] == "check" and t["detail"].get("gate") == "numbers"
+               and t["detail"].get("phase") == "initial" and t["detail"].get("status") != "n/a"]
     prelim = [c for c in claims if any(is_preliminary(x.get("source_type")) for x in c["citations"])]
     status = report["task"]["status"]
     return {
         "supported_citations": sum(x["verdict"] == "supported" for x in cits),
         "checked_citations": len(cits),
-        "numeric_passed": sum(bool(d.get("passed")) for d in numeric),
+        "numeric_passed": sum(d.get("status") == "pass" for d in numeric),
         "numeric_checked": len(numeric),
         "tier12_supported_claims": sum(any(x.get("verdict") in SUPPORTING and x.get("trust_tier") in (1, 2)
                                            for x in c["citations"]) for c in supported_claims),
         "supported_claims": len(supported_claims),
         "preliminary_labeled": sum("PRELIMINARY" in evidence_label(c) for c in prelim),
         "preliminary_claims": len(prelim),
-        "insufficient_correct": int((status == "insufficient_evidence") == bool(expect_insufficient)),
+        # A crash or clarification is never "correct": expected-sufficient questions must end done.
+        "insufficient_correct": int(status == ("insufficient_evidence" if expect_insufficient else "done")),
         "questions": 1,
         "credits": report["totals"]["credits"],
         "input_tokens": report["totals"]["input_tokens"],

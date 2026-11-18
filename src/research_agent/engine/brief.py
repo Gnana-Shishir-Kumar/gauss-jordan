@@ -14,8 +14,8 @@ async def make_brief(ctx: RunContext, question: str, today: date | None = None) 
     today = today or date.today()
     model = ctx.settings.models.strong
     try:
-        res = await ctx.llm.complete_json(model=model, system=prompts.brief_system(today.isoformat()),
-                                          user=f"Question: {question}", schema=Brief)
+        res = await ctx.llm.complete_json(model=model, system=prompts.BRIEF_SYSTEM,
+                                          user=prompts.brief_user(today.isoformat(), question), schema=Brief)
         brief = res.data
         await ctx.emit_llm("brief", "Clarification needed" if brief.needs_clarification else "Brief written", res,
                            level="warning" if brief.needs_clarification else "info")

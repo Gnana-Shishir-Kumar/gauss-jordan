@@ -20,13 +20,13 @@ VERDICTS = ("supported", "partial", "unsupported", "source_unavailable")
 
 
 def coerce_evidence_id(v: Any) -> int:
-    """Accept 12, "12", "E12", "[E12]". A note reference ("N7") becomes -7 so the writer step can map it to
-    that note's evidence ids instead of mistaking it for evidence 7."""
+    """Accept 12, "12", "E12", "[E12]" and sentence IDs "E12-4" (-> 12). A note reference ("N7") becomes -7 so it is
+    never mistaken for evidence 7."""
     if isinstance(v, bool):
         raise ValueError("evidence id must be an integer")
     if isinstance(v, int):
         return v
-    m = re.fullmatch(r"\[?\s*([EN])?(\d+)\s*\]?", str(v).strip(), flags=re.I)
+    m = re.fullmatch(r"\[?\s*([EN])?(\d+)(?:-\d+)?\s*\]?", str(v).strip(), flags=re.I)
     if not m:
         raise ValueError(f"invalid evidence id {v!r}")
     return -int(m.group(2)) if (m.group(1) or "").upper() == "N" else int(m.group(2))
@@ -128,40 +128,24 @@ class Plan(BaseModel):
 
 # --- worker notes --------------------------------------------------------------
 
-def _value_str(v: Any) -> str:
-    """A number's value is informational only (checks read numbers from the text and sentence), so accept
-    missing values and bare numbers like 0.72."""
-    return "" if v is None else str(v)
-
-
-class NoteNumber(BaseModel):
-    value: str = ""
-    sentence: str
-
-    @field_validator("value", mode="before")
-    @classmethod
-    def _v(cls, v: Any) -> str:
-        return _value_str(v)
+def _ref_strings(v: Any) -> list[str]:
+    """Citations as strings. Validity (format, existence in the store) is checked in code, not here, so one bad ID
+    never makes the model redo the whole response."""
+    if v is None:
+        return []
+    if not isinstance(v, list):
+        v = [v]
+    return list(dict.fromkeys(" ".join(str(x).split()).strip("[]").strip() for x in v if str(x).strip()))
 
 
 class Note(BaseModel):
     text: str = Field(min_length=1)
-    evidence_ids: list[int] = Field(min_length=1)
-    numbers: list[NoteNumber] = Field(default_factory=list)
-    design: str | None = None
-    population: str | None = None
-    population_sentence: str | None = None
-    date: str | None = None
+    sentence_ids: list[str] = Field(default_factory=list)
 
-    @field_validator("evidence_ids", mode="before")
+    @field_validator("sentence_ids", mode="before")
     @classmethod
-    def check_ids(cls, v: Any) -> list[int]:
-        return _ids(v)
-
-    @field_validator("date", mode="before")
-    @classmethod
-    def _date(cls, v: Any) -> str | None:
-        return parse_partial_date(v)
+    def _refs(cls, v: Any) -> list[str]:
+        return _ref_strings(v)
 
 
 class EvidenceMeta(BaseModel):
@@ -228,35 +212,23 @@ class Coverage(BaseModel):
 
 # --- writer --------------------------------------------------------------------
 
-class ItemNumber(BaseModel):
-    value: str = ""
-    sentence: str
-    evidence_id: int
-
-    @field_validator("value", mode="before")
-    @classmethod
-    def _v(cls, v: Any) -> str:
-        return _value_str(v)
-
-    @field_validator("evidence_id", mode="before")
-    @classmethod
-    def _id(cls, v: Any) -> int:
-        return coerce_evidence_id(v)
-
-
 class Item(BaseModel):
     text: str = Field(min_length=1)
     claim_type: ClaimType = "fact"
-    evidence_ids: list[int] = Field(default_factory=list)
+    sentence_ids: list[str] = Field(default_factory=list)
     date: str | None = None
     evidence_level: str = "not stated"
     population: str | None = None
-    numbers: list[ItemNumber] = Field(default_factory=list)
 
-    @field_validator("evidence_ids", mode="before")
+    @field_validator("sentence_ids", mode="before")
     @classmethod
-    def check_ids(cls, v: Any) -> list[int]:
-        return _ids(v)
+    def _refs(cls, v: Any) -> list[str]:
+        return _ref_strings(v)
+
+    @field_validator("claim_type", mode="before")
+    @classmethod
+    def _ctype(cls, v: Any) -> Any:
+        return v if v in ("fact", "inference", "uncertain") else "uncertain"
 
     @field_validator("date", mode="before")
     @classmethod
@@ -268,12 +240,6 @@ class Item(BaseModel):
     def _level(cls, v: Any) -> str:
         s = " ".join(str(v or "").split())
         return s or "not stated"
-
-    @model_validator(mode="after")
-    def _needs_citation(self) -> "Item":
-        if self.claim_type in ("fact", "inference") and not self.evidence_ids:
-            raise ValueError(f"{self.claim_type} item must cite at least one evidence id")
-        return self
 
 
 class BottomLine(BaseModel):
@@ -297,26 +263,48 @@ class Draft(BaseModel):
         return _clean_strings(v or [])
 
 
-class RepairedItem(Item):
-    claim_id: int
+RepairActionType = Literal["recite", "search", "delete", "unverified"]
 
 
-class Repair(BaseModel):
-    claims: list[RepairedItem] = Field(default_factory=list)
+class RepairAction(BaseModel):
+    """One repair decision for ONE failed claim."""
+    action: RepairActionType
+    text: str | None = None  # recite: the (possibly corrected) claim text
+    sentence_ids: list[str] = Field(default_factory=list)  # recite: the new citations
+    query: str | None = None  # search: one targeted web search
+    reason: str = ""
+
+    @field_validator("sentence_ids", mode="before")
+    @classmethod
+    def _refs(cls, v: Any) -> list[str]:
+        return _ref_strings(v)
+
+    @field_validator("action", mode="before")
+    @classmethod
+    def _action(cls, v: Any) -> Any:
+        s = str(v or "").strip().lower().replace("-", "_").replace(" ", "_")
+        return {"re_cite": "recite", "cite": "recite", "revise": "recite", "remove": "delete",
+                "mark_unverified": "unverified"}.get(s, s)
+
+    @model_validator(mode="after")
+    def _complete(self) -> "RepairAction":
+        if self.action == "recite" and not self.sentence_ids:
+            raise ValueError("recite needs sentence_ids")
+        if self.action == "search" and not (self.query or "").strip():
+            raise ValueError("search needs a query")
+        return self
 
 
 # --- verifier ------------------------------------------------------------------
 
-class CitationVerdict(BaseModel):
-    evidence_id: int
+class Entailment(BaseModel):
+    """Gate 3: one verdict for the claim against all its cited sentences together."""
     verdict: LLMVerdict
     note: str = ""
 
-    @field_validator("evidence_id", mode="before")
+    @field_validator("verdict", mode="before")
     @classmethod
-    def _id(cls, v: Any) -> int:
-        return coerce_evidence_id(v)
-
-
-class ClaimVerification(BaseModel):
-    verdicts: list[CitationVerdict] = Field(default_factory=list)
+    def _v(cls, v: Any) -> Any:
+        s = str(v or "").strip().lower()
+        return {"partially supported": "partial", "partially_supported": "partial", "not supported": "unsupported",
+                "not_supported": "unsupported", "contradicted": "unsupported"}.get(s, s)

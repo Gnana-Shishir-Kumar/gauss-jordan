@@ -2,8 +2,8 @@
 
 import pytest
 
-from research_agent.engine.checks import (POPULATION_NOT_STATED, check_design, check_numbers, check_population,
-                                          numbers_in)
+from research_agent.engine import numbers
+from research_agent.engine.checks import POPULATION_NOT_STATED, check_design, check_population, numbers_in
 from research_agent.evidence import near_duplicate
 from research_agent.privacy import find_identifiers
 from research_agent.sources import classify, tier_of
@@ -17,14 +17,10 @@ def test_numbers_ignore_names_and_normalize():
 
 
 def test_number_check_passes_and_fails():
-    cit = [{"evidence_id": 1, "excerpt": EXCERPT, "source_sentence": EXCERPT}]
-    assert check_numbers("PFS 23.7 vs 16.6 months (HR 0.7)", cit) == (True, [])
-    ok, problems = check_numbers("PFS 24.1 months (HR 0.70)", cit)
-    assert not ok and "24.1" in problems[-1]
-    fake = [{"evidence_id": 1, "excerpt": EXCERPT, "source_sentence": "HR 0.68 overall."}]
-    ok, problems = check_numbers("HR 0.68", fake)
-    assert not ok and "not in the excerpt" in problems[0]
-    assert check_numbers("No numbers here", []) == (True, [])
+    assert numbers.check("PFS 23.7 vs 16.6 months (HR 0.7)", [EXCERPT]).status == "pass"
+    bad = numbers.check("PFS 24.1 months (HR 0.70)", [EXCERPT])
+    assert bad.status == "fail" and "24.1" in bad.problems[-1]
+    assert numbers.check("No numbers here", []).status == "n/a"
 
 
 def test_design_must_be_stated():

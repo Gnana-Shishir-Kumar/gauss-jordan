@@ -4,8 +4,10 @@ import csv
 import io
 
 import pytest
-from conftest import (NUM_SENTENCE, POPULATION, TIER3_SENTENCE, TODAY, FakeLLM, FakeSearch, h_coverage_complete,
-                      notes_with_numbers, page_for)
+from conftest import (POPULATION, TODAY, FakeLLM, FakeSearch, active, good_item, h_coverage_complete,
+                      latest_task, num_notes, page_for)
+
+from research_agent import storage
 
 from research_agent.engine.checks import POPULATION_NOT_STATED
 from research_agent.exports import to_csv, to_ris
@@ -23,12 +25,10 @@ def test_tier_3_only_claim_is_tagged_uncertain(agent, conn):
         return h_coverage_complete(call)
 
     def draft(call):
-        notes = [n for n in notes_with_numbers(call.llm.conn) if TIER3_SENTENCE in str(n["details"])]
-        eid = notes[0]["evidence_ids"][0]
+        notes = [n for n in storage.get_notes(call.llm.conn, latest_task(call.llm.conn)) if "61%" in n["text"]]
         return {"sufficient": True, "bottom_line": {"text": "b", "confidence": "high", "reason": "r"},
                 "items": [{"text": "Drugx had an objective response rate of 61%.", "claim_type": "fact",
-                           "evidence_ids": [eid], "numbers": [{"value": "61", "sentence": TIER3_SENTENCE,
-                                                               "evidence_id": eid}]}]}
+                           "sentence_ids": notes[0]["sentence_ids"]}]}
 
     from research_agent.backends.search_base import SearchHit
     news = [SearchHit(url="https://www.onclive.com/drugx-orr", title="Drugx ORR", content="drugx response rate",
@@ -49,51 +49,31 @@ def test_login_blocked_guideline_page(agent, conn):
     def draft(call):
         eid = conn.execute("""SELECT e.id FROM evidence e JOIN sources s ON s.id = e.source_id
                               WHERE s.domain = 'nccn.org' AND e.kept = 0""").fetchone()[0]
-        good = notes_with_numbers(call.llm.conn)[0]
-        from conftest import good_item
+        good = num_notes(call.llm.conn)[0]
         return {"sufficient": True, "bottom_line": {"text": "b", "confidence": "moderate", "reason": "r"},
-                "items": [good_item(good),
+                "items": [good_item(call.llm.conn, good),
                           {"text": "NCCN updated its first-line recommendation.", "claim_type": "fact",
-                           "evidence_ids": [eid]}]}
+                           "sentence_ids": [f"E{eid}-1"]}]}
 
-    # The writer cannot fix it in repair, so the citation stays source_unavailable.
-    r = agent.full(FakeLLM(conn, Draft=draft, Repair=lambda c: {"claims": []}), search)
+    # The blocked page has no stored sentences, so the citation is rejected; repair deletes the claim.
+    r = agent.full(FakeLLM(conn, Draft=draft, RepairAction=lambda c: {"action": "delete", "reason": "no source"}),
+                   search)
     ev = next(e for e in r["evidence"] if e["url"] == "https://nccn.org/drugx-egfr-nsclc-fda-approval")
     assert not ev["kept"] and ev["drop_reason"].startswith("source_unavailable") and "login" in ev["drop_reason"]
     assert ev["source_type"] == "guideline" and ev["trust_tier"] == 1
     # The blocked page never counts as support for any claim.
-    assert all(not (x["evidence_id"] == ev["id"] and x["verdict"] in ("supported", "partial"))
-               for c in r["claims"] for x in c["citations"])
+    assert all(x["evidence_id"] != ev["id"] for c in r["claims"] for x in c["citations"])
+    nccn = next(c for c in r["claims"] if c["text"].startswith("NCCN"))
+    assert nccn["status"] == "deleted" and nccn["rejected"][0]["reason"] == "sentence ID not in the evidence store"
     assert r["task"]["status"] == "done"  # the run continued with the other sources
 
-
-def test_citation_to_unavailable_evidence_gets_source_unavailable(agent, conn, settings):
-    import asyncio
-
-    from research_agent import storage
-    from research_agent.engine.context import RunContext
-    from research_agent.engine.verifier import verify_claims
-
-    tid = storage.create_task(conn, "q")
-    sq = storage.add_sub_query(conn, tid, "q")
-    src = storage.upsert_source(conn, "https://nccn.org/x", "nccn.org", "NCCN", None, None, 1, "guideline")
-    ev = storage.add_evidence(conn, tid, sq, src, "snippet only", 0.9, kept=False,
-                              drop_reason="source_unavailable: 403 Forbidden: login required")
-    cid = storage.add_claim(conn, tid, "NCCN updated its recommendation.", 0, "fact")
-    storage.add_citation(conn, cid, ev)
-    llm = FakeLLM(conn)
-    asyncio.run(verify_claims(RunContext(conn, tid, settings, llm, FakeSearch())))
-    cit = storage.get_claims(conn, tid)[0]["citations"][0]
-    assert cit["verdict"] == "source_unavailable" and "login required" in cit["verifier_note"]
-    assert llm.count("ClaimVerification") == 0  # never sent to the LLM verifier
 
 
 def test_population_not_stated_when_not_in_sources(agent, conn):
     def draft(call):
-        n = notes_with_numbers(call.llm.conn)[0]
-        from conftest import good_item
-        a = good_item(n) | {"population": "adults aged 65 or older in Japan"}  # not stated anywhere
-        b = good_item(n) | {"population": None}
+        n = num_notes(call.llm.conn)[0]
+        a = good_item(call.llm.conn, n) | {"population": "adults aged 65 or older in Japan"}  # not stated anywhere
+        b = good_item(call.llm.conn, n) | {"population": None}
         return {"sufficient": True, "bottom_line": {"text": "b", "confidence": "moderate", "reason": "r"},
                 "items": [a, b]}
 
@@ -106,30 +86,24 @@ def test_population_never_inferred_when_page_omits_it(agent, conn):
     pages_without_population = {}
 
     class NoPop(FakeSearch):
-        async def extract(self, urls, *, query=None):
-            res = await super().extract(urls, query=query)
+        async def extract(self, urls, *, depth="basic"):
+            res = await super().extract(urls, depth=depth)
             res.pages = {u: t.replace("Approval was based on a phase 3 randomized trial in adults aged 18 years or "
                                       "older in North America and Asia. ", "") for u, t in res.pages.items()}
             return res
 
-    def notes(call):  # a careless worker claims a population the excerpt does not state
-        from conftest import blocks
-        return {"notes": [{"text": "f", "evidence_ids": [e], "population": POPULATION,
-                           "population_sentence": "Patients were adults aged 18 years or older.",
-                           "numbers": [{"value": "0.70", "sentence": NUM_SENTENCE}]} for e, _ in blocks(call.user)]}
-
-    r = agent.full(FakeLLM(conn, WorkerNotes=notes), NoPop())
-    assert all(n["details"]["population"] is None for n in r["notes"])
-    assert all(c["population"] == POPULATION_NOT_STATED for c in r["claims"])
+    # the writer claims a population that no cited sentence states
+    r = agent.full(FakeLLM(conn), NoPop())
+    assert active(r) and all(c["population"] == POPULATION_NOT_STATED for c in r["claims"])
+    assert POPULATION not in str(r["notes"])
     assert pages_without_population == {}
 
 
 def test_evidence_level_not_inferred(agent, conn):
     def draft(call):
-        n = notes_with_numbers(call.llm.conn)[0]
-        from conftest import good_item
+        n = num_notes(call.llm.conn)[0]
         return {"sufficient": True, "bottom_line": {"text": "b", "confidence": "moderate", "reason": "r"},
-                "items": [good_item(n) | {"evidence_level": "phase 2 single-arm trial"}]}
+                "items": [good_item(call.llm.conn, n) | {"evidence_level": "phase 2 single-arm trial"}]}
 
     r = agent.full(FakeLLM(conn, Draft=draft), FakeSearch())
     assert r["claims"][0]["evidence_level"] == "not stated"
