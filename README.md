@@ -1,103 +1,146 @@
-# Oncology Update Briefs
+# Oncology Update Briefs — Research Agent
 
-**What has changed for this clinical question since a given date?** This research agent turns an oncologist's question into a dated update brief they can read in under five minutes and verify in seconds. Every claim cites a source excerpt, every number is shown beside the verbatim sentence it came from, and a verifier model checks each claim against the original text.
+> ODSC × Nebius Hackathon submission · Challenge: _Build a research agent that brings its sources_
 
-Built for the Nebius hackathon. It uses [Nebius Token Factory](https://tokenfactory.nebius.com) for all LLM inference and [Tavily](https://tavily.com) `search` + `extract` for live web evidence.
+**One-line pitch:** For a practicing oncologist, "what has changed for this clinical question since my guideline version?" answered as a dated brief in which every claim quotes the exact stored sentences it rests on and passes three verification gates (numbers in code, PMID/NCT/DOI resolution, entailment) before it is shown as verified.
 
-> **Clinician-support tool.** This brief summarizes published and public information to support a clinician's professional judgment and independent review. It is not for patients and does not give patient-specific recommendations.
->
-> **Use limits:**
-> - clinician-facing only
-> - not for patients
-> - not for urgent or time-critical decisions
-> - does not use patient data
-> - summarizes published and public information for independent review
+**Demo video (2–3 min):** <!--DEMO_LINK-->_link to be added_
 
-## Who it's for and the task
+**Team:** <!--TEAM-->_names / GitHub handles to be added_
 
-The user is a practicing oncologist. A guideline was last updated, or a major paper came out, on some date, and they need to know what has changed since then for one clinical question. For example: first-line EGFR-mutant metastatic NSCLC since the 2024 ESMO update, or HER2-low metastatic breast cancer since June 2025.
+> **Clinician-support tool.** This brief summarizes published and public information to support a clinician's professional judgment and independent review. It is not for patients and does not give patient-specific recommendations. Use limits: clinician-facing only; not for patients; not for urgent or time-critical decisions; no patient data; page text only (figures, image tables and supplements are not read).
 
-The output is a dated brief:
+## The problem
 
-1. **Bottom line:** one sentence, with confidence (high, moderate or low) and the reason for it.
-2. **What's new since [anchor date]:** one item per development, newest first. Each item shows:
-   - the date and source type
-   - what changed
-   - the evidence level in plain words (e.g. "phase 3 randomized trial")
-   - whether it is peer-reviewed or **PRELIMINARY**, labeled in the item itself
-   - the study population, or "population not stated"
-   - key numbers, each beside its verbatim source sentence
-   - the source links with their verdicts
-3. **Sources disagree:** conflicts, and how the sources differ.
-4. **Not yet established:** aspects with insufficient evidence.
-5. **Check before acting:** e.g. full publication pending, label wording, guideline version.
-6. **The clinician-support statement.**
+Oncology changes faster than guidelines are reissued. Between versions, an oncologist needs to know what moved for one question (a new approval, a label change, a trial readout, a trial stopped, a guideline update) and needs to trust each item enough to act on it after checking the source. General search answers mix press releases with regulatory decisions, drop dates, and cite pages that do not say what the answer claims. PubMed-only tools miss regulatory and registry changes that never appear there.
 
-### Why live web evidence complements PubMed-based tools
+This agent takes the question and the guideline baseline the clinician is working from (name, version, date; supplied by the user, never scraped), searches regulators, registries, guideline publishers, journals, conferences and news on or after that date, and returns a "What changed" table plus items that each quote their source sentences, show their trust tier and evidence level, and state which verification gates they passed. When the evidence is not there it says so instead of filling the gap.
 
-PubMed-based tools are strong on indexed, peer-reviewed literature. Many decision-relevant changes in oncology appear on the web first, or never appear in PubMed at all:
+## How it works
 
-- regulatory approvals, label changes and safety communications (FDA, EMA)
-- guideline updates (NCCN, ESMO, ASCO)
-- conference abstracts and trial readouts
-- trial status changes (ClinicalTrials.gov)
-- company announcements
+```
+question (+ guideline baseline) → identifier check → brief → plan queries → [approval]
+  → Tavily search (tier-filtered, since anchor date) → select & dedupe → full text (Tavily Extract, or PubMed/PMC,
+    ClinicalTrials.gov, openFDA APIs) → stored as numbered sentences (E12-4) → FAST notes citing sentence IDs
+  → coverage check → (follow-up round | stop reason) → STRONG writer (notes only, cites sentence IDs)
+  → verifier: gate 1 numbers (code) → gate 2 identifiers (PubMed/CT.gov/Crossref) → gate 3 entailment (FAST → STRONG)
+  → per-claim repair (max 2 rounds) → tier rules + conflict detection in code → brief with citations
+```
 
-This agent searches those sources first, filtered to on or after the anchor date. It labels anything preliminary as preliminary, so it adds to a PubMed workflow rather than replacing it.
+- **Query planning:** the STRONG model writes a brief (cancer type, setting, anchor date, 2–6 aspects a complete answer must cover) and 3–5 queries. Round 1 searches tier 1–2 domains only (regulators, registries, guideline publishers, journals) at advanced depth from the anchor date; a coverage check (independence counted in code as distinct sites) asks for at most one follow-up per thin aspect, adding conference and news domains. Research stops with one of four printed reasons: `coverage_complete`, `no_new_evidence`, `quota_reached`, `time_budget`.
+- **Evidence handling:** full page text is stored once per source and split into numbered sentences; workers see only the most relevant sentences with their IDs and return short notes citing them. The writer never sees page text. Every claim must cite stored sentence IDs; anything else (unknown IDs, invented URLs) is rejected in code. Each claim then passes three gates (details below), and failed claims are repaired one at a time: re-cite, one targeted search from a reserved quota, delete, or mark unverified. Trust tiers are assigned in code: a journal page counts as peer-reviewed only if its PMID/DOI resolves to the same title; an efficacy number resting only on press releases or news is tagged company-reported. Tier 1–2 sources that disagree are shown side by side.
+- **Safety:** clinician-facing only, with the use limits above; an input check blocks patient identifiers before anything is stored; web text is wrapped as untrusted data and can never change instructions or trigger actions; NCCN is never accessed; practice-impact notes are labelled as interpretations; confidence is capped when evidence is preliminary or sources disagree; every step is traced in SQLite with model ID and prompt version.
+- **Trade-offs:** verification costs time and tokens (about 12 minutes and 28 Tavily credits for a typical brief, most of it reasoning-heavy LLM calls); page text only, so figures and supplements are not read; deterministic checks are deliberately strict, so some true statements are flagged rather than any wrong number being shown as verified; news-only items are kept but shown as uncertain rather than dropped, because they are often the first signal of a change.
+
+## Required services
+
+| Service | Used for |
+|---|---|
+| **Nebius Token Factory** (inference) | all LLM calls. Model: STRONG `deepseek-ai/DeepSeek-V4-Pro-0813` (brief, planning, coverage, writing, repair), FAST `deepseek-ai/DeepSeek-V4.1-Flash-1017` (worker notes, entailment gate), via the OpenAI-compatible API |
+| **Tavily** (real-time web search) | all discovery: `search` (explicit depth, `auto_parameters` off, domain and date filters) and `extract` (full page text); never `/research` |
+| Additional ground-truth sources (free public APIs) | PubMed / PubMed Central, ClinicalTrials.gov v2, openFDA Drugs@FDA, Crossref: identifier resolution, source dates and registry/approval records for pages Tavily found |
 
 ## Setup
 
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
-
 ```bash
-uv sync
-cp .env.example .env        # fill in NEBIUS_API_KEY and TAVILY_API_KEY
-uv run python scripts/list_models.py   # confirm the STRONG and FAST model IDs exist
+git clone https://github.com/Gnana-Shishir-Kumar/gauss-jordan.git && cd gauss-jordan
+python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env                                   # set NEBIUS_API_KEY and TAVILY_API_KEY
+python src/agent.py "What has changed for first-line EGFR-mutant metastatic NSCLC since 2024-06-01?" --yes
+streamlit run app/streamlit_app.py                     # web UI
 ```
 
-`list_models.py` prints every Token Factory model ID and marks the configured STRONG and FAST models `OK` or `NOT FOUND`, with similar IDs suggested. Set `RESEARCH_STRONG_MODEL` and `RESEARCH_FAST_MODEL` in `.env`, or edit `config.py`, before relying on them. **Keys are read only from the environment and are never logged or printed.**
+With [uv](https://docs.astral.sh/uv/): `uv sync`, then `uv run research "..."` and `uv run streamlit run app/streamlit_app.py`. `python scripts/list_models.py` confirms the model IDs exist on Token Factory. Keys are read only from the environment and never logged.
+
+## Example
+
+**Question:** What has changed for first-line treatment of metastatic EGFR-mutant non-small cell lung cancer since 2024-06-01? (baseline: ESMO metastatic NSCLC living guideline v1.1, stated by the user)
+
+**Answer excerpt** (live run, 2026-11-18; a snapshot of public sources, not clinical guidance):
+
+> **Bottom line:** Since June 2024, first-line amivantamab plus lazertinib gained FDA and European Commission approval for EGFR exon 19 deletion or L858R metastatic NSCLC with a VTE prophylaxis recommendation, while ASCO's living guideline reviewed RAMOSE and did not change its recommendation (confidence: moderate; key overall survival data are not yet fully published and some items come from news sources).
+>
+> | Change | Date | Evidence level | Tier | Review status | Verified |
+> |---|---|---|---|---|---|
+> | new approval | 2024-08-19 | regulatory decision | 1 | not peer-reviewed | yes |
+> | safety communication | 2024-08-19 | regulatory decision | 1 | not peer-reviewed | yes |
+> | new approval | 2025-12-17 | regulatory decision | 1 | not peer-reviewed | yes |
+> | new trial data | 2026-02-02 | phase 2 randomized trial | 2 | peer-reviewed | yes |
+>
+> - On August 19, 2024, the FDA approved amivantamab plus lazertinib for first-line treatment of locally advanced or metastatic EGFR-mutant NSCLC with exon 19 deletions or exon 21 L858R substitution mutations [1]. *Checks: numbers pass · identifiers n/a · entailment supported.*
+> - A serious VTE safety signal was observed with lazertinib plus amivantamab, and prophylactic anticoagulation should be given for the first four months of therapy [1].
+> - The subcutaneous formulation (Rybrevant Faspro) was originally approved on 2025-12-17, with a supplement approved on 2026-11-05 [2].
+> - The randomized phase II RAMOSE trial compared osimertinib with and without ramucirumab in TKI-naïve EGFR-mutant metastatic NSCLC [3].
+
+**Sources** (each claim quotes its sentence by ID):
+
+1. FDA, *FDA approves lazertinib with amivantamab-vmjw for non-small lung cancer*, https://www.fda.gov/drugs/resources-information-approved-drugs/fda-approves-lazertinib-amivantamab-vmjw-non-small-lung-cancer (tier 1). `E183-8`: "On August 19, 2024, the Food and Drug Administration approved lazertinib (Lazcluze, Janssen Biotech, Inc.) in combination with amivantamab-vmjw (Rybrevant, Janssen Biotech, Inc.) for the first-line treatment of locally advanced or metastatic non-small cell lung cancer (NSCLC) with epidermal growth factor receptor (EGFR) exon 19 deletions or exon 21 L858R substitution mutations, as detected by an FDA-approved test." `E183-19`: "A serious safety signal of venous thromboembolic events (VTE) was observed with lazertinib in combination with amivantamab and prophylactic anticoagulation should be administered for the first four months of therapy."
+2. openFDA Drugs@FDA approval history for amivantamab, https://api.fda.gov/drug/drugsfda.json?search=openfda.generic_name:"amivantamab" (tier 1). `E186-11`: "RYBREVANT FASPRO (BLA761433) original approval ORIG-1 (type 5 - new formulation or new manufacturer) was approved on 2025-12-17." `E186-10`: "RYBREVANT FASPRO (BLA761433) supplement SUPPL-2 (efficacy) was approved on 2026-11-05."
+3. *Signal Transduction and Targeted Therapy* (Nature), RAMOSE trial, https://www.nature.com/articles/s41392-025-02550-y (tier 2; DOI confirmed against Crossref).
+
+The same brief also listed 8 developments that rest only on news or press releases (shown as uncertain), one efficacy number tagged *company-reported, not peer-reviewed*, and a preliminary conference abstract on VTE timing.
+
+## Failure / insufficient-evidence case
+
+**Question:** What has changed for the investigational agent TQX-9182 in second-line pleural mesothelioma since 2025-01-01? (TQX-9182 is a fictional drug code from the eval set; nothing about it exists.)
+
+**What the agent did** (live run, 2026-11-19, `evals/results/20261119T220800Z-insuff.json`): three research rounds, 16 Tavily calls (stop reason `quota_reached`), 16 PubMed and 2 ClinicalTrials.gov lookups. It kept sources that matched the words "pleural mesothelioma", wrote notes about other agents, and then **refused to report anything**:
+
+> **Status: insufficient_evidence**
+>
+> Insufficient evidence: No retrieved source addresses the investigational agent TQX-9182 or its use in second-line pleural mesothelioma. The available notes cover other mesothelioma agents or settings (pemetrexed-platinum after immunotherapy, VT3989, perioperative nivolumab/ipilimumab, DREAM3R durvalumab plus chemotherapy) and unrelated regulatory actions, so no TQX-9182 trial readouts, status changes, safety communications, approvals, label changes, guidelines, publications, or investigator updates since 2025-01-01 can be reported.
+>
+> **1. Bottom line:** No bottom line: the evidence found was insufficient. · **What changed:** No changes found.
+>
+> **Check before acting:** Search clinical trial registries, manufacturer disclosures, and conference abstract databases for TQX-9182-specific updates; confirm whether TQX-9182 has any public data or regulatory status after 2025-01-01.
+
+No bottom line is produced without verified items, and the CLI exits with code 3. Other failure paths are handled the same way: a question with patient identifiers is blocked before anything is stored (exit 6); a question too vague to search returns one clarifying question (exit 4); claims whose numbers cannot be sourced are removed and listed under "Removed during verification"; a run that fails after research can be resumed (`--resume`).
+
+## Judging criteria map
+
+| Criterion | Weight | Where to look |
+|---|---|---|
+| Sourced and verifiable answers | 30% | [Example](#example), [The three verification gates](#the-three-verification-gates), [Seeded-error eval](#seeded-error-eval) |
+| Works end to end | 25% | [Setup](#setup), demo, live runs in [Evals](#evals) |
+| Usefulness | 20% | [The problem](#the-problem), the What-changed table, [Baseline comparison](#baseline-comparison-for-the-demo) |
+| Agent design | 15% | [How it works](#how-it-works), [Architecture](#architecture), [Bounded repair loop](#bounded-repair-loop) |
+| Use of Token Factory and Tavily | 10% | [Required services](#required-services), [Why Tavily discovers and structured APIs give ground truth](#why-tavily-discovers-and-structured-apis-give-ground-truth), [Token, cost and latency summary](#token-cost-and-latency-summary) |
+
+## License
+
+<!--LICENSE-->_To be added (the hackathon template uses MIT)._
+
+---
+
+# Details
 
 ## Run
 
 ```bash
 # CLI: shows the brief and planned queries, asks to start (or pass --yes)
 uv run research "What has changed for first-line EGFR-mutant metastatic NSCLC since 2024-06-01?"
-uv run research "..." --yes --export ris --out sources.ris
-uv run research --run 12                      # approve a prepared task later
-uv run research --show 12                     # reprint a stored brief
+uv run research "What changed for first-line EGFR-mutant NSCLC?" \
+    --guideline "ESMO metastatic NSCLC living guideline" --guideline-version v1.1 --guideline-date 2024-06-01 --yes
+uv run research --run 12          # approve a prepared task later
+uv run research --resume 12       # re-run writing + verification for a task that failed after research
+uv run research --show 12 --export ris --out sources.ris
 
-# Web UI
+# Web UI (guideline baseline fields under the question box)
 uv run streamlit run app/streamlit_app.py
 ```
 
-**CLI exit codes:**
-
-| Code | Meaning |
-|---|---|
-| 0 | done |
-| 1 | failed |
-| 2 | missing keys |
-| 3 | insufficient evidence |
-| 4 | needs clarification |
-| 5 | not approved |
-| 6 | identifiers detected |
-
-**UI:**
-- a question box with the no-identifiers notice
-- the brief and planned queries, with a **Start research** button
-- live progress: the run happens in a background thread and the page polls SQLite, so a refresh doesn't interrupt it
-- the brief with verdict, claim-type, tier and PRELIMINARY badges
-- numbers beside their source sentences
-- clickable sources, CSV and RIS downloads, credit and token totals
-- an expandable trace showing the model ID and prompt version for every step
+CLI exit codes: 0 done · 1 failed · 2 missing keys · 3 insufficient evidence · 4 needs clarification · 5 not approved · 6 identifiers detected.
 
 **Tests and evals:**
 
 ```bash
-uv run pytest                    # mocked unit tests, no network
-uv run pytest -m live -s         # optional live smoke test (skipped without keys)
-uv run python evals/run_evals.py # 15 questions, live
+uv run pytest                    # mocked tests, no network
+uv run pytest -m live -s         # optional live smoke test
+uv run python evals/run_evals.py # eval questions, live (--offset/--limit/--tavily-calls to shard and cap)
 uv run python evals/compare.py   # drift gate against evals/baseline.json
+uv run python evals/seeded_eval.py "evals/results/*shard*.db"   # seeded-error eval on stored briefs (no Tavily credits)
+uv run python evals/baseline_compare.py --db research.db --task 2 # plain search+LLM baseline vs this pipeline
 ```
 
 ## Deploy to the cloud (container on a VM, e.g. Nebius AI Cloud)
@@ -146,348 +189,252 @@ The image runs as a non-root user and has a health check on `/_stcore/health`.
 
 ```mermaid
 flowchart TD
-    Q[Question] --> P{Identifier check}
+    Q[Question + optional guideline baseline] --> P{Identifier check}
     P -- identifiers --> X[Blocked, nothing stored]
-    P --> B["1. Brief (STRONG)<br/>cancer type, setting, question, anchor date"]
+    P --> B["1. Brief (STRONG)<br/>cancer type, setting, anchor date, guideline baseline"]
     B -- too vague --> C[Clarifying question]
-    B --> PL["2. Plan (STRONG)<br/>3-5 broad queries"]
-    PL --> A[3. Approval<br/>UI button / CLI prompt or --yes]
-    A --> R["4. Research workers (parallel)<br/>Tavily search: tiers, start_date, cache<br/>snippet scoring, batched extract, cache<br/>FAST notes with verified numbers/design/population"]
-    R --> CV["5. Coverage (STRONG)<br/>aspects: covered / thin / conflict<br/>independence = distinct sites, in code"]
-    CV -- thin or conflict, no stop rule --> R
-    CV -- stop rule --> W["6. Write (STRONG)<br/>from notes only"]
-    W --> V["7. Verify<br/>number check in code, then FAST verifier vs original excerpt"]
-    V --> RP["8. Repair once (STRONG)<br/>re-verify revised claims only"]
-    RP --> F[Finalize: tier-3-only -> uncertain,<br/>confidence caps, status]
-    F --> OUT[Update brief + trace in SQLite]
+    B --> PL["2. Plan (STRONG): 3-5 queries"]
+    PL --> A[3. Approval: UI button / CLI prompt or --yes]
+    A --> R["4. Research workers (parallel)<br/>Tavily search discovers pages<br/>full text: Tavily Extract, or PubMed / PMC / ClinicalTrials.gov / openFDA APIs<br/>raw text stored, split into sentence IDs (E12-4)<br/>FAST notes: short finding + sentence IDs"]
+    R --> T["Identifiers resolved, trust tier + date set from the source"]
+    T --> CV["5. Coverage (STRONG): aspects covered / thin<br/>independence counted in code"]
+    CV -- thin, no stop reason --> R
+    CV -- stop reason --> W["6. Write (STRONG) from notes only<br/>citations must be stored sentence IDs"]
+    W --> V["7. Verify each claim: gate 1 numbers (code)<br/>gate 2 identifiers (PubMed / CT.gov / Crossref)<br/>gate 3 entailment (FAST, escalates to STRONG)"]
+    V --> RP["8. Repair, one claim per call, max 2 rounds<br/>re-cite / one targeted search / delete / mark unverified"]
+    RP --> F["Finalize in code: tier rules, conflicts,<br/>bottom line from verified items only"]
+    F --> OUT[Brief + What-changed table + trace in SQLite]
 ```
 
-- **Engine** (`src/research_agent/engine/`): plain async functions, one per step (`brief`, `planner`, `research`, `coverage`, `writer`, `verifier`), plus `checks` (the deterministic guards) and the `orchestrator`. The orchestrator exposes `prepare()` (brief and plan, then it stops for approval), `run()` (everything after approval) and `run_all()`. There is no UI code in the engine, so a FastAPI wrapper could call these functions as they are.
-- **Backends** (`backends/`): `llm.py` wraps Token Factory through `AsyncOpenAI`. `tavily.py` implements the `SearchBackend` protocol in `search_base.py`. `cache.py` checks before every Tavily call. To add another source, implement `search()` and `extract()`; the engine doesn't change.
-- **Storage** (`storage.py`): SQLite, written after every step. A crash leaves a full trace, and the UI polls it for progress.
-- **Everything else:** `prompts.py` (all prompts and `PROMPT_VERSION`), `sources.py` (tiers and source types), `privacy.py`, `exports.py`, `metrics.py`, `render.py`.
+- **Engine** (`src/research_agent/engine/`): plain async functions, one per step (`brief`, `planner`, `research`, `coverage`, `writer`, `verifier`, `repair`), plus `numbers` (gate 1), `checks`, `conflicts`, `quota` and the `orchestrator` (`prepare()`, `run()`, `run_all()`, `resume()`). No UI code.
+- **Backends** (`backends/`): `llm.py` (Token Factory via `AsyncOpenAI`), `tavily.py` (Tavily over `httpx`), `structured.py` (PubMed/PMC, ClinicalTrials.gov, openFDA, Crossref), `identifiers.py` (PMID/NCT/DOI resolution with a SQLite cache). All search backends implement the same `SearchBackend` protocol (`search()`, `extract()`).
+- **Storage** (`storage.py`): SQLite, written after every step. Sources keep their raw text once; `sentences` holds the numbered sentences that every citation points to.
 
-### How it decides what to search, and when to stop
+## Sentence-level evidence
 
-1. **Brief.** The STRONG model extracts cancer type, setting (stage, line, biomarker), the question, the anchor date, and 2–6 aspects a complete answer must cover.
-   - With no anchor date, it defaults to 12 months ago and says so in the brief.
-   - If cancer type or setting is too vague to search well, it returns a clarifying question instead of searching.
-2. **Plan.** 3–5 independent, fairly broad queries.
-3. **Round 1** searches **tiers 1–2 only**, at basic depth, with up to 10 results per query and `start_date` set to the anchor date.
-   - Each worker scores its hits on the **snippets** (Tavily score blended with term overlap) and sends only its top 2 URLs to extraction.
-   - The round's URLs are extracted together, at most 20 per call, after checking the cache.
-4. **Coverage.** The STRONG model labels each aspect covered, thin or conflicting, and cites evidence IDs.
-   - Code, not the model, decides whether an aspect has **≥2 independent sources**, meaning two distinct sites (subdomains of one site, such as pubmed.ncbi.nlm.nih.gov and ncbi.nlm.nih.gov, count once).
-   - Follow-up queries are generated only for thin or conflicting aspects. They run at advanced depth over tiers 1–3.
-   - Each follow-up names its aspect. Code allows **at most one follow-up per aspect per round**, and none for an aspect that already has independent sources.
-   - A query is also skipped if it overlaps an earlier one by ≥0.7 (term Jaccard). Every skipped query is logged with its reason.
-5. **Stop rules**, checked in this order. The first that fires is saved to `tasks.stop_reason`:
+1. A worker fetches a page's **full text** and stores it once per source. The text is split deterministically into numbered sentences. Within a brief a source is evidence `E12` and its sentences are `E12-1`, `E12-2`, ...
+2. The worker (FAST model) sees only the 14 sentences most relevant to its query, each prefixed by its ID, inside a data-only `<untrusted_source>` block. It returns **compressed notes**: one short finding plus the sentence IDs it rests on. Code drops notes that cite IDs it was not shown, or that state numbers not in their cited sentences.
+3. **Raw page text never enters the planner, coverage check or writer.** They see notes (finding + IDs) and trusted metadata (domain, tier, type, date).
+4. The writer must end every claim with sentence IDs. **Code rejects** any claim citing an ID that is not in the store, a sentence index the page does not have, or a URL that is not one of the brief's sources, and sends it to repair. Fabricated references are closed in code, not by asking the model nicely.
 
-   | Stop reason | When |
-   |---|---|
-   | `coverage_complete` | every aspect has ≥2 independent sources |
-   | `few_new_evidence` | the round added fewer than 2 new kept evidence items |
-   | `max_rounds` | 2 rounds have run (round 1 plus one follow-up round) |
-   | `time_budget` / `credit_budget` | the time or credit budget is used up |
-   | `no_new_queries` | there are no non-duplicate follow-ups |
-   | `coverage_check_failed` | the coverage step failed |
+Each source records URL, title, trust tier, source type, retrieval date, the date from the source itself (and where that date came from), and how its text was fetched.
 
-### Source tiers and how trust is shown
+## The three verification gates
 
-| Tier | Domains | Use |
+Each claim runs through three gates in order. Each gate's result is stored separately on every citation (`number_gate`, `id_gate`, `entail_gate`), so the UI, the trace and the evals show *which* gate failed.
+
+| Gate | How | Fails when |
 |---|---|---|
-| 1: regulatory, registries, guidelines | fda.gov, ema.europa.eu, clinicaltrials.gov, cancer.gov, nccn.org, esmo.org, asco.org, ncbi.nlm.nih.gov, pubmed.ncbi.nlm.nih.gov | all rounds |
-| 2: journals | nejm.org, thelancet.com, jamanetwork.com, ascopubs.org, annalsofoncology.org, aacrjournals.org, nature.com | all rounds |
-| 3: oncology news, press releases | ascopost.com, onclive.com, targetedonc.com, cancernetwork.com, prnewswire.com, businesswire.com, globenewswire.com | follow-up rounds only, as leads; **always labeled lower trust** |
+| **1. Numbers** (code, no LLM) | Every number, unit, percentage, hazard ratio, confidence interval, p-value, date and sample size in the claim must appear in its cited sentences, verbatim or after normalization: `0.70` = `.70`, `1,024` = `1024`, `12 months` = `12-month`, `61%` = `61 percent`, `p<.001` = `P < 0.001`, `June 2025` matches `June 1, 2025`. Units must agree (12 months is not 12%), p-value comparators must agree (`p=0.001` is not `p<0.001`). | a quantity is not in the cited sentences, or a confidence interval is out of order (lower < point estimate < upper) |
+| **2. Identifiers** | Every PMID, NCT number and DOI in the claim, and each cited source's own identifier, is resolved (PubMed E-utilities, ClinicalTrials.gov API v2, Crossref; cached in SQLite) and the resolved title must match the stored source. An identifier in the claim must also belong to a cited source. | the ID does not exist, resolves to a different title, or is not an ID of any cited source (a service outage is recorded as `error`, not a failure) |
+| **3. Entailment** (FAST model, escalates to STRONG) | The judge sees **only** the claim and its cited sentences, plus one neighbouring sentence on each side marked *context*. It is told that support may come from the **combination** of several cited sentences. Verdict: `supported`, `partial` or `unsupported`. Escalation: the STRONG model re-judges when the FAST call fails or returns invalid output, and when FAST says `partial` on a claim with numbers. | `partial` or `unsupported` |
 
-- **Filtering:** domains are restricted with Tavily `include_domains`, and dates with `start_date` (publish date). Any result outside the allowlist is recorded as `off_allowlist` and not used.
-- **Tier 3:** a claim whose only supporting sources are tier 3 is retagged **uncertain**.
-- **Press releases:** company newsroom domains can't be put on an allowlist, so they are only found through the three wire services listed.
-- **Source types:** `regulatory_action`, `guideline`, `registry_entry`, `peer_reviewed_article`, `conference_abstract`, `preprint`, `press_release`, `news`. Deterministic URL rules run first (e.g. `fda.gov` is a regulatory action, `_suppl` DOIs and `meetings.asco.org` are conference abstracts, journal domains are peer-reviewed articles). The FAST worker classifies only what the rules leave ambiguous, and anything left over falls back to the conservative `news`.
-- **Preliminary evidence:** conference abstracts, preprints and press releases are **PRELIMINARY**. The label is added by code inside each item, not left to the model or a legend.
-- **Peer review:** `peer_reviewed` is true only when a supporting source is a peer-reviewed article.
-- **Login walls:** some guideline pages need a login. When extraction fails, the evidence is stored with `drop_reason = source_unavailable: …`, any citation to it gets the verdict `source_unavailable`, and the run continues.
-- **Confidence caps:** the bottom line is capped at **low** when no finding is supported by a tier 1–2, non-preliminary source. It is capped at **moderate** when items are flagged or sources disagree.
+Gate 1 fails fast: a claim with an unsourced number never costs an LLM call.
 
-### How evidence is deduplicated and checked
+### Worked example (from a live brief)
 
-- **Dedupe.** URLs are normalized (lowercase host, no `www.`, no fragment, no tracking parameters, sorted query). Evidence is deduped by normalized URL and by a content hash, within and across rounds. Dropped items are kept with a reason:
-  - `duplicate_url`, `duplicate_content`
-  - `low_relevance`, `not_selected_for_extraction`
-  - `off_allowlist`, `source_unavailable`
-- **Untrusted data.** Retrieved text and notes derived from it always sit inside `<untrusted_source>` or `<untrusted_note>` blocks. Any such tags inside page text are removed first, and every prompt containing them says never to follow instructions found there. The agent only reads the web and takes no actions based on page content.
-- **Worker notes (FAST)** are checked against the excerpts in code:
-  - Each number must come with a sentence that appears verbatim in the excerpt and contains that number.
-  - A design phrase (e.g. "phase 3 randomized") must appear in the excerpt.
-  - A population needs a verbatim population sentence that states it.
-  - Anything that fails is dropped and logged.
-- **The writer** sees notes and trusted metadata only, never raw page text.
-- **Numbers.** Before the LLM verifier runs, code checks that every number in a claim (HR, %, months, p-values, doses, dates) appears in that claim's stored verbatim source sentence, and that the sentence (at least four words) appears as whole words in the cited excerpt, so "5%" never matches inside "45%". Both ends of a range or confidence interval (30-40%, 0.58-0.85) are checked. A failure marks the citation **unsupported** without calling the LLM and sends the claim to repair. Numbers inside names such as HER2, CDK4/6, PD-1, G12C or "phase 3" are not checked as results.
-- **Evidence level** may only name phase or design words stated in a cited excerpt, and not negated there ("non-randomized" or "not randomized" never supports "randomized"); otherwise it is "not stated".
-- **Population** must come from a verified note for a cited source; otherwise it is "population not stated". It is never inferred, and a negated term never matches ("without brain metastases" doesn't support "with brain metastases"; "non-small cell" doesn't support "small cell").
-- **Verifier (FAST).** Each claim–citation pair is checked against the original excerpt and gets `supported`, `partial`, `unsupported` or `source_unavailable`.
-- **Claim verdict.** A claim takes the *worst* verdict among its checked citations, so one supporting source can't hide another that doesn't state the claim. Only `supported` counts as verified: `partial` means different numbers, dates or populations, so it is flagged. A `source_unavailable` citation (login wall) is ignored when another citation was checked.
-- **Repair (once).** Claims with any partial or unsupported citation go back to the STRONG writer with the verifier's notes. The writer may revise the claim, drop the citations that don't state it, cite other evidence, or mark it uncertain. Only revised claims are re-verified. Anything not fully supported is shown **FLAGGED: not verified** and never as verified. If nothing is supported, the task ends `insufficient_evidence`.
-- **Dates.** An item's date is kept only if a cited source carries a matching date; otherwise the latest cited source date is used. An item dated before the anchor is marked uncertain, shown as **DATED BEFORE [anchor]: not new**, and does not count as a new verified development.
-- **Bottom line.** It may only state what the verified items state. It is kept as drafted only when every item verified unchanged and its numbers all come from verified items. Otherwise it is rewritten from the verified items alone, and its numbers are checked again in code; if that fails, a plain bottom line naming the newest verified item is used. With no verified items there is no bottom line.
+Stored source `E183` is the FDA's approval page. Its sentence `E183-8` reads: *"On August 19, 2024, the Food and Drug Administration approved lazertinib … in combination with amivantamab-vmjw … for the first-line treatment of locally advanced or metastatic non-small cell lung cancer …"*. Another claim in the same brief (EVEREST trial, PubMed 39389055) states *"median PFS was 9.6 months"*.
+
+- **Wrong number.** The seeded eval changed the claim to *"median PFS was 10.7 months"*. Gate 1: `'10.7' (number month) not found in the cited sentences` → **unsupported**, no LLM call. Repair then re-cited or removed the claim; a number that cannot be sourced from stored evidence is never kept.
+- **Number from the wrong arm.** Changing the drug arm's value to the comparator arm's (e.g. *"PFS 16.6 months with amivantamab plus lazertinib"* when the sentence gives 23.7 vs 16.6) passes gate 1, because 16.6 *is* in the sentence. Gate 3 is what catches it: the judge reads both arms and returns **unsupported**.
+- **Fabricated reference.** Appending *"(PMID 99999999)"* fails gate 2: PubMed has no such record.
+- **Swapped citation.** Citing the venous-thromboembolism sentences for the approval claim fails gate 1 (the date is not in those sentences) or gate 3 (they say nothing about an approval).
+
+## Bounded repair loop
+
+Failed claims are repaired **one claim per call**, never by rewriting the brief. Each round (max 2):
+
+1. If gate 1 failed, **code** first looks for stored sentences of this brief that contain every number in the claim and re-cites to them (no LLM call).
+2. Otherwise the STRONG model picks one action for that claim alone: **re-cite** from existing notes (optionally correcting the text), run **one targeted search** from the reserved Tavily quota, **delete** the claim, or mark it **unverified**.
+3. Revised claims go through all three gates again.
+
+After the last round, a claim still failing gate 1 is **deleted** (a number that cannot be sourced is removed, never invented) and any other failing claim is kept but marked **unverified** and uncertain. Deleted claims are listed under "Removed during verification".
+
+## Trust tiers (enforced in code)
+
+| Tier | What | Rule |
+|---|---|---|
+| 1 | FDA, EMA, ClinicalTrials.gov, guideline publications (ESMO, ASCO; NCCN only as the user's stated baseline) | regulator, registry and guideline source types |
+| 2 | Peer-reviewed journals | **only if the article's PMID or DOI resolves to the same title**; a journal page whose identifier cannot be confirmed drops to tier 4 |
+| 3 | Conference abstracts, preprints | always labelled **PRELIMINARY** |
+| 4 | Press releases, news | a tier 4 source can **never be the only support for an efficacy number**: such a claim is tagged **company-reported, not peer-reviewed** and its claim type set to `uncertain`; any claim resting only on tier 4 is uncertain |
+
+- Search domains are grouped by the tier their pages usually get; round 1 searches tiers 1–2 only (Tavily `include_domains`, strict), follow-up rounds add conference hosts and news. The actual tier is assigned after fetching, from the source type and the identifier check.
+- **NCCN is never searched or fetched** (its terms prohibit automated access). The user supplies the guideline name, version and date; values the model extracts are kept only if the user wrote them. Login-gated pages are recorded as `source_unavailable`.
+- The bottom line is capped at **low** without a supported tier 1–2, non-preliminary finding, and at **moderate** when items are flagged or sources disagree.
+
+## Why Tavily discovers and structured APIs give ground truth
+
+Tavily is the only discovery engine: it finds the regulatory pages, guideline and journal articles, conference abstracts and news that matter for "what changed", across many sites, filtered by date. The structured APIs are used only to **check and ground** what Tavily found:
+
+- **PubMed / PubMed Central:** a PubMed URL is read as the PubMed record (title, journal, publication date, abstract); open-access articles as PMC full text. A journal page Tavily cannot extract falls back to PMC full text, then is recorded as a coverage gap.
+- **ClinicalTrials.gov API v2:** a registry URL is read as the record: status, phase, start/completion dates, last update posted, whether results are posted.
+- **openFDA (Drugs@FDA):** an FDA approval page is paired with the approval history of the drugs it names (original approvals and supplements with dates), as its own tier 1 evidence.
+- **Crossref:** DOI resolution for gate 2 and tier 2 confirmation.
+- **Dates come from the source:** PubMed publication date, ClinicalTrials.gov last update posted, Drugs@FDA approval dates, Crossref published date. Tavily's `published_date` is kept only as a hint.
+
+Each API has its own call cap and rate spacing (NCBI: 3 requests/s, or 10/s with `NCBI_API_KEY`). No dependency beyond `httpx`.
+
+## Searching, quotas and stop reasons
+
+- **Tavily settings everywhere:** `search_depth` set explicitly and `auto_parameters` off (cost never silently doubles); evidence searches at advanced depth with `chunks_per_source=3`; `include_answer` and `include_raw_content` off (we verify only against fetched page text, never Tavily's answer or snippets); Extract returns full text (no query chunking) and its `failed_results` are read even on HTTP 200, retried once with advanced extraction, then PMC, then recorded as a gap; concurrency semaphore of 5; 429s honour `Retry-After` with backoff; the `/research` endpoint is never used.
+- **Quotas per brief:** one pooled Tavily budget of **40 calls** (every search and every extract call counts one), of which **8 are reserved for repair**; separate caps for PubMed (60), ClinicalTrials.gov (40), openFDA (20) and Crossref (40). Usage is stored on the task and shown in the report.
+- **Stop reasons** (every stop prints its reason and why):
+
+  | Stop reason | When |
+  |---|---|
+  | `coverage_complete` | every aspect has ≥2 independent sources (distinct sites, counted in code) |
+  | `no_new_evidence` | two consecutive rounds added no new sentence IDs, or nothing is left to search (no new follow-up queries, or the coverage check failed) |
+  | `quota_reached` | the research share of the Tavily quota is spent, or the 4-round safety cap is reached |
+  | `time_budget` | the 420 s research time budget is spent |
+
+- **Resilience:** a writer call that hits a transient error is retried after 15 s and 45 s; a run that still fails after research can be resumed with `research --resume ID` without new research calls.
+
+## Context and cost efficiency
+
+- Every prompt is **fixed instructions first, changing content last**: system prompts are module constants (byte-identical across calls of the same step; even today's date moved into the user message), so cached input pricing applies. Nebius reports cached tokens, and the report shows the cached share per step.
+- Fetched text only appears inside data-only `<untrusted_source>` blocks; page content can never choose tools, change instructions or trigger actions.
+- Every report ends with a **cost by step** table (LLM calls, input and output tokens, cached share, Tavily credits, seconds), also in the UI trace.
 
 ## Safety and governance
 
 | Concern | What addresses it |
 |---|---|
-| **Hallucination detection** | Number checks in code against verbatim source sentences; per-citation LLM verification against the original excerpt; one repair pass; unverified claims shown as FLAGGED; `insufficient_evidence` when nothing holds up; writer limited to verified notes. |
-| **Explainability** | Every claim cites evidence IDs with links; numbers are shown beside their source sentences; claim type, evidence level, peer-review or PRELIMINARY label, tier and verifier note appear on each item; the stop reason is shown. |
-| **Clinical safety** | Clinician-facing statement and use limits in the UI, CLI and README; no patient-specific recommendations; not for urgent decisions; tier-3-only claims tagged uncertain; confidence caps; a "check before acting" section; preliminary evidence labeled in the item. |
-| **Privacy** | No patient data is used. An input check blocks MRN-like numbers, dates of birth and names with "patient", Mr or Mrs before anything is stored. Keys come only from the environment and are never logged. |
-| **Auditability** | SQLite trace written after every step: sub-queries, every evidence item including dropped ones and why, notes, claims, verdicts, latency, tokens and Tavily credits. Model ID and prompt version are on every task and trace event. CSV and RIS exports. |
-| **Drift** | `PROMPT_VERSION` is recorded on every task and event. `evals/compare.py` fails if citation support rate or number-check pass rate drops by more than 3 points against the baseline. **Rerun evals and the drift gate before changing any model or prompt.** |
-| **Evidence-population bias** | The population is shown per item when a source states it (age range, region, key exclusions), and is never inferred; otherwise "population not stated", so clinicians can judge applicability to their patients. |
+| **Hallucination detection** | Citations must be stored sentence IDs (checked in code); three verification gates per claim; per-claim repair with deletion of unsourceable numbers; unverified claims shown as UNVERIFIED or FLAGGED; `insufficient_evidence` when nothing holds up; seeded-error eval measures it. |
+| **Explainability** | Every claim quotes its cited sentences verbatim by ID; each gate's result is shown; tier, peer-reviewed / PRELIMINARY / COMPANY-REPORTED label and the stop reason are on every brief. |
+| **Clinical safety** | Clinician-facing statement and use limits in the UI, CLI and README; no patient-specific recommendations; tier 4-only efficacy numbers tagged company-reported and uncertain; conflicts shown side by side; confidence caps; practice-impact notes labelled as interpretations. |
+| **Privacy** | No patient data. An input check blocks MRN-like numbers, dates of birth and patient names before anything is stored. Keys come only from the environment and are never logged. A contact e-mail is sent to NCBI/Crossref only if you set one. |
+| **Auditability** | SQLite trace after every step: sub-queries, every source (fetched raw text, sentences, how it was fetched, why dropped), notes, claims, each gate's result, repair actions, API calls, tokens, cached tokens, credits and latency. Model ID and prompt version on every task and event. CSV and RIS exports. |
+| **Drift** | `PROMPT_VERSION` on every task and event. `evals/compare.py` fails if citation support rate or number-check pass rate drops by more than 3 points against the baseline; seeded-eval results are saved per run for comparison. |
+| **Evidence-population bias** | Population shown per item only when a cited sentence states it; otherwise "population not stated". |
 
-**Why the design follows FDA's non-device CDS principles.** The FDA's criteria for clinical decision support software that is not a medical device (21st Century Cures Act §520(o)(1)(E), FDA CDS guidance, 2022) include:
-
-- **No image or signal analysis.** The tool does not acquire, process or analyze medical images or signals.
-- **Published information only.** It displays and summarizes medical information such as guidelines, regulatory documents and studies, not patient data.
-- **Clinician-facing.** It supports a healthcare professional, not patients or caregivers, and is not intended for time-critical decisions.
-- **Transparent, independently reviewable basis.** Every claim links to its source, numbers sit beside their verbatim sentences, and verification verdicts are shown, so the clinician need not rely mainly on the tool.
-
-**This is a design rationale, not a regulatory determination.** Whether a specific deployment is a device depends on its intended use and labeling, and needs a regulatory review.
+**Why the design follows FDA's non-device CDS principles** (21st Century Cures Act §520(o)(1)(E); FDA CDS guidance, 2022): no image or signal analysis; published information only; clinician-facing and not for time-critical decisions; a transparent basis the clinician can review independently (every claim quotes its sentences, every gate result is shown). **This is a design rationale, not a regulatory determination.**
 
 ## Exports
 
-From the UI download buttons or `--export csv|ris`, the sources used in a brief export as:
-- **CSV:** evidence IDs, title, URL, domain, source type, date, trust tier, verdicts.
-- **RIS** for Zotero or EndNote: `TY` by source type (JOUR, ABST, GOVDOC, PRESS…), `TI`, `UR`, `PY` and `DA`, `DB`, `KW` with source type and tier, and `N1` with type, tier and evidence IDs.
+From the UI or `--export csv|ris`: **CSV** (evidence IDs, title, URL, domain, source type, date, trust tier, verdicts) and **RIS** for Zotero or EndNote (`TY` by source type, `TI`, `UR`, `PY`/`DA`, `KW` with type and tier). Standard library only.
 
-Both use the standard library only.
+## Evals
 
-## Evals and drift gate
+### Seeded-error eval
 
-- **Questions:** `evals/questions.jsonl` holds 15 oncology "what's changed" questions across 12 cancer types. Three use fictional investigational codes and should end in insufficient evidence. Each has `clinician_rating` and `clinician_notes` fields, left `null` for later expert review.
-- **Running:** `evals/run_evals.py` runs them live with a fresh database (so the cache doesn't hide credit costs). It saves `evals/results/<stamp>.json` with the model IDs, the prompt version and these pooled metrics:
+`evals/seeded_eval.py` takes briefs that already ran (their stored sources, sentences, notes and verified claims) and, for every verified claim, builds a clean **control** copy plus corrupted copies with one injected error each:
 
-| Metric | Definition |
+| Error type | Injection |
 |---|---|
-| citation support rate | supported citations / checked citations |
-| numeric check pass rate | first-pass number checks passed / numeric claims |
-| tier 1–2 support share | supported claims backed by a tier 1–2 source / supported claims |
-| preliminary labeled share | claims citing preliminary evidence that carry the PRELIMINARY label |
-| insufficient-evidence accuracy | runs that ended `insufficient_evidence` exactly when expected |
-| cost and speed | average credits, latency and tokens per question |
+| `wrong_number` | one number changed (e.g. 9.6 → 10.7 months) |
+| `swapped_citation` | the claim cites another claim's sentences from a different source |
+| `fabricated_id` | a PMID or NCT number that does not exist is added |
+| `stale_date` | an approval date two years before the anchor is put in the claim |
+| `tier4_only_efficacy` | an efficacy claim's support is re-labelled as a press release |
+| `number_from_other_arm` | (harder, extra) a number replaced by **another number from the same cited sentences**, e.g. the comparator arm's value; gate 1 passes by design, only entailment can catch it |
 
-- **Drift gate:** `evals/compare.py` compares the newest result with `evals/baseline.json` and exits 1 if a gated metric drops by more than 3 points or is missing. `--set-baseline` saves the latest run as the new baseline.
+Every copy goes through the real gates (live FAST model for entailment, live PubMed/ClinicalTrials.gov/Crossref), then the repair loop (targeted searches disabled, so no Tavily credits), then the tier rules. It reports precision and recall per error type and per gate, the false-positive rate on clean claims, citation support before and after repair, how many corrupted claims would still be shown as verified, and each brief's credits, tokens and seconds. Results are saved per run as `evals/results/seeded-<stamp>.json`.
 
-## Credit and latency numbers
+Live run on 2026-11-19 over the 12 eval briefs above (`evals/results/seeded-20261119T220931Z.json`): 5 verified claims sampled per brief, repair run on the first 3 briefs (repair makes one STRONG call per failed claim; precision and recall use every brief).
 
-**Measured live** on 2026-11-15, with the live smoke-test question (first-line EGFR-mutant metastatic NSCLC since 2024-06-01), default settings and an empty cache:
+12 briefs, 60 clean claims, 237 seeded errors. Overall precision 100.0%, recall 99.6%, false-positive rate on clean claims 0.0%.
 
-| | Value |
+| Error type | Cases | Caught | Recall | Caught by | Error still shown as verified after repair* |
+|---|---|---|---|---|---|
+| wrong_number | 29 | 28 | 96.6% | numbers 26, entailment 2 | 0 of 8 |
+| swapped_citation | 60 | 60 | 100.0% | numbers 45, entailment 15 | 0 of 15 |
+| fabricated_id | 60 | 60 | 100.0% | identifiers 60 | 0 of 15 |
+| stale_date | 60 | 60 | 100.0% | numbers 60 | 0 of 15 |
+| tier4_only_efficacy | 16 | 16 | 100.0% | tier_rule 16 | 0 of 5 |
+| number_from_other_arm | 12 | 12 | 100.0% | entailment 8, numbers 4 | 0 of 2 |
+
+| Gate | Flags on seeded errors | Flags on clean claims | Precision |
+|---|---|---|---|
+| citation | 0 | 0 | n/a |
+| numbers | 135 | 0 | 100.0% |
+| identifiers | 60 | 0 | 100.0% |
+| entailment | 25 | 0 | 100.0% |
+| tier_rule | 16 | 0 | 100.0% |
+
+Repair ran on 3 briefs (75 cases). Citation support rate on those cases: 26.7% before repair, 100.0% shown as verified after repair; clean claims still verified after repair: 100.0%.
+*Counted on the briefs where repair ran: a seeded error 'leaks' only if it is still in the claim and the claim is shown as verified without the label that flags it. Leaks: 0 of 60; the rest were corrected, removed or marked unverified by repair.
+Per brief (original run): 21.7 Tavily credits, 38953.0 input / 57620.6 output tokens, 741.5 s.
+
+Notes, honestly:
+- **The one miss** was partly an injector bug: meant to change the "2" in "2-5 cm", it changed "HER2-negative" to "HER5-negative". Gate 1 ignores gene and drug names by design, and the entailment judge accepted the changed biomarker name. The injector is fixed; a changed biomarker name is a real blind spot to keep testing.
+- **Most seeded errors are mechanical**, so gate 1 catches them without an LLM call; the harder `number_from_other_arm` cases (a value that does appear in the cited sentences, e.g. the comparator arm's) are where entailment does the work (8 of 12; the other 4 broke confidence-interval ordering, which gate 1 checks).
+- **Repair** turned 26.7% supported (only the clean controls and tier-4 cases) into 100% verified on the repaired briefs **without keeping any seeded error**: wrong numbers were re-cited to the sentences with the right values, fake PMIDs/NCTs and stale dates were dropped from the text, swapped citations re-cited.
+- On the live briefs themselves (not seeded), the repair loop ran 8 times and all 8 claims passed every gate afterwards (see below).
+
+### Live eval questions and drift gate
+
+`evals/questions.jsonl` holds 15 "what's changed" questions across 12 cancer types (three use fictional drug codes and should end `insufficient_evidence`). `evals/run_evals.py` runs them live into a fresh database and saves `evals/results/<stamp>.json` with citation support rate, number-check pass rate, tier 1–2 support share, preliminary-label share, insufficient-evidence accuracy, and average credits, latency and tokens. `evals/compare.py` exits 1 if a gated metric drops by more than 3 points against `evals/baseline.json` (`--set-baseline` accepts a run).
+
+Live run on 2026-11-19: the 12 answerable questions (11 cancer types), each capped at 20 Tavily calls (4 reserved for repair), run as three parallel shards. Results: `evals/results/20261119T204445Z-shard{0,4,8}.json`.
+
+| Metric | Result |
 |---|---|
-| Result | `done`, stop reason `max_rounds`; 5 items and 1 conflict, every claim verified or repaired |
-| Tavily credits | **11**: round 1 had 5 basic searches (5) and one extract batch (1); round 2 had 2 advanced searches (4) and one extract batch (1) |
-| Wall time | about **8 minutes** (3.5 to 6 s per search, under 5 s per extract batch) |
-| Tokens | 31,193 input / 69,510 output |
-| Slowest LLM calls | writer 165 s (about 16,000 output tokens), notes 19 to 103 s each, coverage 51 to 55 s each |
-| Fastest LLM calls | verifier 2 to 5 s per claim |
+| Briefs finished `done` | **12 / 12** |
+| Claims written / shown as verified | 137 / 137 (none deleted, none left unverified) |
+| First-pass gate failures | 8 (5 number gate, 3 entailment), **all fixed by the repair loop** (8 re-cites) |
+| Number-check pass rate (first pass) | 95.5% |
+| Citation support rate (final) | 100% |
+| Tier 1–2 support share | 64.2% of verified claims rest on a tier 1–2 source |
+| Efficacy numbers tagged company-reported (tier 4 only) | 15 |
+| Kept sources by tier | 56 tier 1 · 55 tier 2 · 2 tier 3 · 76 tier 4 |
+| Stop reasons | 5 `quota_reached`, 4 `time_budget`, 2 `coverage_complete`, 1 `no_new_evidence` |
+| Average per brief | **21.7 Tavily credits**, 38,953 input / 57,621 output tokens, 742 s (median about 9 min; one brief took 51 min because of slow LLM calls) |
 
-The first live attempt ran with the original settings: 3 rounds, a 4,096-token output limit and no per-aspect cap. It used **23 credits** and then failed at the writer, because the token limit cut off its JSON. That run is why the output limit, timeout, round count and follow-up cap are what they are now.
+The drift gate (`evals/compare.py`) gates citation support rate and number-check pass rate; set this run as the baseline with `--set-baseline --latest <file>`.
 
-- **Worst case under the defaults:**
+### Baseline comparison (for the demo)
 
-  | Item | Credits |
-  |---|---|
-  | Round 1: 5 basic searches | 5 |
-  | Round 1: extract 10 URLs | 2 |
-  | Round 2: up to 5 advanced searches (one per thin aspect) | 10 |
-  | Round 2: extract 10 URLs | 2 |
-  | **Total** | **19** |
+`evals/baseline_compare.py` runs one question through a plain baseline (**one** Tavily search + **one** LLM answer, no verification) and puts every baseline claim through this project's checks: claims citing URLs that were not in the search results are rejected, the cited page is fetched and split into sentences, and the three gates and tier rules run unchanged. It prints which baseline claims would be flagged next to the pipeline's own result for the same question.
 
-  That is below the 60-credit budget, which also stops the loop. Extract is billed at 1 credit per 5 successful URLs at basic depth.
-- **Cache:** repeat questions within 7 days reuse cached searches and pages at 0 credits. Searches are keyed by the exact query (only case and spacing are normalized, so "stage II" and "stage IV" never share results) and its parameters. Extracted pages are keyed by URL and question, because Tavily returns the chunks relevant to that question. Empty search results are not cached.
-- **Latency:** dominated by LLM calls. These models write long reasoning before their JSON, so each call is allowed up to 16,384 output tokens (`llm_max_tokens`) and 300 s. Other defaults: 30 s per search, 60 s per extract, and a 420 s research budget.
-- **Across questions:** these numbers come from one question. Run `evals/run_evals.py` for averages over all 15.
+Live result (2026-11-19) for the EGFR NSCLC question, pipeline side = the stored run above:
 
-### Credits vs traditional search
+**Baseline** (1 search + 1 LLM answer, no checks): 5 claims. Through this project's checks: **0 fail a verifier gate**, **4 rest only on news or press releases** (would be shown as uncertain), 1 pass. 3 Tavily credits.
 
-`evals/credit_comparison.py` replays a stored run's own queries and search results under traditional strategies, so it makes no new API calls. For the live run above:
+| Baseline claim | Gates | Source tier | Outcome here | Cited URL |
+|---|---|---|---|---|
+| Amivantamab plus lazertinib was FDA approved for first-line treatment of locally advanced or metastatic NSCLC harboring EGFR exon 19 deletions or exon 21 L858R mutations based on the phase 3 MARIPOSA trial. | numbers n/a · identifiers n/a · entailment supported | 4 | shown as uncertain: supported only by tier 4 sources (press release / news) | https://targetedonc.com/view/polling-data-show-updates-in-treatment-of-mnsclc-with-egfr-mutations |
+| In MARIPOSA, amivantamab plus lazertinib showed a 7.1-month improvement in median progression-free survival and a 30% reduction in the risk of progression or death compared with osimertinib. | numbers pass · identifiers n/a · entailment supported | 4 | shown as uncertain: efficacy number supported only by tier 4 sources (press release / news): company-reported | https://targetedonc.com/view/polling-data-show-updates-in-treatment-of-mnsclc-with-egfr-mutations |
+| Overall survival improvements in both FLAURA2 and MARIPOSA have changed practice and made combination strategies the first-line therapy for most patients with EGFR-mutated NSCLC. | numbers n/a · identifiers n/a · entailment supported | 4 | shown as uncertain: supported only by tier 4 sources (press release / news) | https://oncologynewscentral.com/nsclc/as-practice-changing-data-hit-egfr-mutated-nsclc-care-whats-next |
+| Osimertinib monotherapy remains an option in older, fragile patients and those with good prognostic features such as absence of EGFR mutation in plasma and TP53 wild-type status because it provides the best safety profile. | numbers n/a · identifiers pass · entailment supported | 2 | verified | https://pmc.ncbi.nlm.nih.gov/articles/PMC12963156 |
+| The NorthStar trial showed that adding local consolidation therapy, whether radiation or in some cases surgery, to first-line osimertinib monotherapy seemed to improve progression-free survival in EGFR-mutated lung cancer. | numbers n/a · identifiers n/a · entailment supported | 4 | shown as uncertain: supported only by tier 4 sources (press release / news) | https://oncologynewscentral.com/nsclc/as-practice-changing-data-hit-egfr-mutated-nsclc-care-whats-next |
 
-| Strategy | Search credits | Extract calls | Pages extracted | Extract credits | **Total** | vs project |
+**This pipeline** (task 2, done): 13 claims written, 13 pass every gate (5 backed by tier 1-3 sources, 8 news-only and shown as uncertain), 0 removed or marked unverified by repair; 28 Tavily credits.
+
+What this shows, honestly: the baseline's claims were mostly *accurate to their pages*: none failed a verifier gate. The difference is **what they rest on**: 4 of 5 came only from news sites, so here they would be shown as uncertain (one efficacy number as company-reported), while the pipeline grounds its findings in FDA, Drugs@FDA and PubMed-confirmed sources, quotes the exact sentences, and shows the evidence level, tier and date for each change. The baseline's output varies run to run; rerun the script for a fresh sample.
+
+## Token, cost and latency summary
+
+Measured live on 2026-11-18 (first-line EGFR-mutant metastatic NSCLC since 2024-06-01, ESMO baseline, default settings, empty cache; `research --show` prints this table for any run):
+
+| Step | LLM calls | Input tokens | Output tokens | Cached share | Tavily credits | Seconds |
 |---|---|---|---|---|---|---|
-| **This project** (billed): snippet scoring, top results only, batched extract, basic depth in round 1 | 9 | 2 | 14 | 2 | **11** | 1.0x |
-| Fetch every result, batched 20 per call | 9 | 4 | 67 | 14 | **23** | 2.1x |
-| Fetch every result, one call per page | 9 | 67 | 67 | 67 | **76** | 6.9x |
-| Advanced search + fetch every page | 14 | 67 | 67 | 67 | **81** | 7.4x |
+| brief | 1 | 516 | 294 | n/r | 0 | 2.7 |
+| plan | 1 | 303 | 620 | n/r | 0 | 4.2 |
+| search (12 Tavily searches, advanced) | 0 | 0 | 0 | | 24 | 48.8 (summed per call) |
+| extract (Tavily batches + openFDA) | 0 | 0 | 0 | | 4 | 25.0 |
+| notes (FAST) | 10 | 21,003 | 33,137 | 17% | 0 | 209.9 |
+| coverage (STRONG) | 3 | 13,918 | 45,272 | 24% | 0 | 261.4 |
+| write (STRONG) | 1 | 4,044 | 10,027 | n/r | 0 | 58.1 |
+| verify (FAST, gate 3) | 13 | 9,711 | 1,787 | 25% | 0 | 17.4 |
+| **total** | 29 | 49,495 | 91,137 | 9,344 cached | **28** | about 12 min wall clock |
 
-Asking the same question again within 7 days costs the project **0** credits (cache), against 23–81 for the traditional strategies.
+Calls against the quotas: Tavily 16 of 40 (none of the 8 repair calls needed), openFDA 2, Crossref 3. "n/r" means the API did not report cached tokens for that call.
 
-Where the savings come from:
-- **Reading snippets first.** The 7 searches returned 67 unique pages. Scoring the snippets let the project extract only the 14 most relevant, instead of fetching all 67.
-- **Batching extraction.** Pages from a round are extracted together, up to 20 per call, instead of one call per page.
-- **Depth by need.** Round 1 uses basic search (1 credit). Only targeted follow-ups use advanced (2 credits), and only one per thin aspect.
-- **The cache.** Searches and pages are reused for 7 days.
-
-How the numbers are computed:
-- The project row is what Tavily actually billed.
-- The other rows price the same queries and results at Tavily's published rates: search 1 credit (basic) or 2 (advanced); extract 1 credit per 5 successful URLs, rounded up per call.
-- Rounding up per call is what makes one-page-per-call expensive. If Tavily instead pooled fractions across calls, that row would fall to about 23, the same as the batched row, and the snippet-scoring and cache savings would remain.
-- In this run Tavily billed slightly less for extraction than the published rate (2 credits for 14 pages, against 3).
-
-```bash
-uv run python evals/credit_comparison.py --markdown    # latest finished task in research.db
-```
-
-## Example brief (live run, redacted trace)
-
-> A real run from 2026-11-15, shown to illustrate the output. It is a snapshot of web sources from that day, **not clinical guidance**: check the sources before acting.
->
-> **Redactions:** long claim text and queries are trimmed with `[…]` and the per-call token counts are removed. Traces never contain patient data, identifiers or API keys.
-
-```
-Question: What has changed for first-line treatment of metastatic EGFR-mutant non-small cell lung cancer since 2024-06-01?
-Status:   done
-
-BRIEF
-Cancer type: non-small cell lung cancer
-Setting: metastatic, first line, EGFR-mutant
-Since: 2024-06-01
-Aspects: regulatory approvals and label changes; guideline updates; trial readouts and conference data;
-         safety communications; trial status changes
-
-1. BOTTOM LINE
-First-line treatment of metastatic EGFR-mutant NSCLC has shifted toward combination regimens, with FDA approval
-of amivantamab plus lazertinib and ASCO living guideline endorsement of combination therapy as preferred, while
-osimertinib monotherapy remains an option for patients prioritizing tolerability. (confidence: moderate;
-multiple tier 1 and 2 sources support the shift, but some dates are unknown and OS/comparative data remain preliminary.)
-
-2. WHAT'S NEW SINCE 2024-06-01 (newest first)
-1. 2025-11-19 · Peer-reviewed article · Tier 1
-   What changed: An individual patient data comparison of FLAURA2 and MARIPOSA found a statistically significant
-   PFS difference favoring FLAURA2 in the ITT population (HR 0.79), not confirmed for OS; […]  [fact; supported]
-   Evidence level: phase 3 clinical trials · Peer-reviewed
-   Population: population not stated
-   Key numbers (source sentences):
-     E69: "In progression free survival (PFS), there was a statistically significant difference favoring the FLAURA2
-           in the intent-to-treat (ITT) population [Hazard ratio (HR) 0.79], not confirmed in the overall survival
-           (OS) analysis where we did not find any significant difference."
-     […]
-   Source E69: https://pubmed.ncbi.nlm.nih.gov/41270639 (supported)
-2. 2024-08-19 · Regulatory action · Tier 1
-   What changed: FDA approved lazertinib in combination with amivantamab-vmjw for first-line treatment of locally
-   advanced or metastatic NSCLC with EGFR exon 19 deletions or exon 21 L858R substitution mutations; lazertinib with
-   amivantamab improved PFS versus osimertinib (HR 0.70), median PFS 23.7 versus 16.6 months.  [fact; supported]
-   Evidence level: regulatory decision · Not peer reviewed (regulatory action)
-   Population: first-line treatment of locally advanced or metastatic NSCLC with EGFR exon 19 deletions or exon 21
-               L858R substitution mutations
-   Key numbers (source sentences):
-     E67: "Lazertinib with amivantamab demonstrated a statistically significant improvement in PFS compared to
-           osimertinib with a hazard ratio of 0.70 (95% confidence interval [CI]: 0.58, 0.85; p-value=0.0002)."
-     E67: "The median PFS was 23.7 months (95% CI: 19.1, 27.7) in the lazertinib with amivantamab arm and 16.6
-           months (95% CI: 14.8, 18.5) in the osimertinib arm."
-   Source E67: https://fda.gov/drugs/resources-information-approved-drugs/fda-approves-lazertinib-amivantamab-vmjw-non-small-lung-cancer (supported)
-3. date not stated · Peer-reviewed article · Tier 2
-   What changed: ASCO living guideline: FLAURA2 and MARIPOSA support superior efficacy of combination treatment versus
-   osimertinib alone; clinicians should consider combination regimens the preferred option, with osimertinib
-   monotherapy remaining an option for patients prioritizing tolerability; […]  [fact; supported]
-   Evidence level: expert guideline · Peer-reviewed
-   Source E45: https://ascopubs.org/doi/10.1200/JCO-25-02822 (supported)
-4. date not stated · Peer-reviewed article · Tier 2
-   What changed: An exploratory overall survival analysis of FLAURA2 in patients with poorer prognostic factors was
-   published in Annals of Oncology; the publication year is not established.  [uncertain; partial]
-   (failed the number check on the first draft; repaired, then re-verified as partial)
-5. date not stated · Conference abstract · Tier 1
-   What changed: In descriptive risk analyses, any-grade VTE incidence was numerically higher with amivantamab plus
-   lazertinib (21%) than with amivantamab (11%) or lazertinib (11%) monotherapy.  [fact; supported]
-   Evidence level: descriptive univariate risk analyses · PRELIMINARY (conference abstract), not peer reviewed
-   Key numbers (source sentences):
-     E66: "The incidence of VTE events of any grade was numerically higher in pts who received ami+laz (21%) than
-           those who received ami (11%) or laz (11%) monotherapy."
-   Source E66: https://asco.org/abstracts-presentations/218907 (supported)
-
-3. SOURCES DISAGREE
-1. One source describes osimertinib as the preferred first-line option; the ASCO living guideline now states
-   combination regimens should be considered preferred.  [uncertain; supported]
-   Sources E45 (ascopubs.org) and E47 (ncbi.nlm.nih.gov/pmc) (both supported)
-
-4. NOT YET ESTABLISHED
-- No direct head-to-head FLAURA2 versus MARIPOSA trial; the indirect comparison suggests a PFS difference but OS was not confirmed.
-- VTE risk with amivantamab plus lazertinib is based on descriptive univariate analyses, not a definitive safety analysis.
-- Exact dates of the ASCO living guideline update and the VTE analysis are not stated in the evidence.
-- […]
-
-5. CHECK BEFORE ACTING
-- Confirm current FDA label wording for lazertinib/amivantamab, including exact mutation indications.
-- Confirm ASCO living guideline version and date.
-- Confirm VTE risk data in a peer-reviewed publication or full safety analysis.
-- […]
-
-6. Clinician-support tool. […] Use limits: […]
-
-Stop reason: max_rounds
-Tavily credits: 11 · tokens: 31193 in / 69510 out
-Models: strong=deepseek-ai/DeepSeek-V4-Pro-0813, fast=deepseek-ai/DeepSeek-V4.1-Flash-1017 · prompt version: onc-2026.11.2
-
-TRACE
-  [brief   ] Brief written                                              (4 s, STRONG)
-  [plan    ] Planned 5 queries                                          (6 s, STRONG)
-  [approval] Waiting for approval / Approved; research started
-  [round   ] Round 1: 5 queries, basic depth, tiers [1, 2]
-  [search  ] 10 results for 'first-line EGFR-mutant NSCLC safety communication FDA EMA 2024 2025'  (1 cr)
-  [search  ] 10 results for '[…] clinical trial status change 2024 2025'                         (1 cr)
-  [search  ] 10 results for '[…] trial results ASCO ESMO WCLC 2024 2025'                         (1 cr)
-  [search  ] 10 results for 'NCCN ESMO guideline update first-line EGFR-mutant metastatic NSCLC […]' (1 cr)
-  [search  ] 10 results for 'FDA EMA regulatory approval label change […]'                        (1 cr)
-  [extract ] Extracted 8/10 URLs in one batch     (2 failed: annalsofoncology.org, oncologypro.esmo.org -> source_unavailable)  (1 cr)
-  [evidence] Kept 2/2 for each of 4 queries
-  [notes   ] 4 + 2 + 4 + 3 notes                                        (19-103 s each, FAST)
-  [coverage] 2/5 aspects have >= 2 independent sources; 2 follow-up queries
-             (2 more skipped: "aspect already covered")                 (55 s, STRONG)
-  [round   ] Round 2: 2 queries, advanced depth, tiers [1, 2, 3]
-  [search  ] 10 results for 'MARIPOSA FLAURA2 clinical trial status update ClinicalTrials.gov 2025'  (2 cr)
-  [search  ] 10 results for 'amivantamab lazertinib safety warning venous thromboembolism FDA 2025'  (2 cr)
-  [extract ] Extracted 4/4 URLs in one batch                            (1 cr)
-  [notes   ] 3 + 7 notes                                                (54-55 s each, FAST)
-  [coverage] 2/5 aspects have >= 2 independent sources                  (51 s, STRONG)
-  [stop    ] Research stopped after round 2: max_rounds
-  [write   ] Drafted 5 items, 1 conflicts (sufficient=True)             (165 s, STRONG)
-  [check   ] Claims 1, 4, 5: numeric check passed · Claim 3: numeric check failed
-  [verify  ] Claims 1, 2, 4, 5: supported · Claim 6: 2 supported        (2-5 s each, FAST)
-  [repair  ] Revised 1/1 failed claims                                  (23 s, STRONG)
-  [verify  ] Claim 3: 1 partial
-  [done    ] Finished: done
-```
+- **Where time goes:** these models write long reasoning before their JSON, so the coverage check and worker notes dominate (one notes call produced 18,000 output tokens in 125 s). Research stops on the 420 s `time_budget` in practice; verification is fast (about 1 s per claim).
+- **Where credits go:** evidence searches run at advanced depth (2 credits each) by design; Extract is 1 credit per 5 pages; PubMed, ClinicalTrials.gov, openFDA and Crossref cost no Tavily credits.
+- **Cache:** searches (exact query + parameters) and fetched page text are reused for 7 days at 0 credits.
+- `evals/credit_comparison.py` prices a stored run's own queries against "fetch every result" strategies.
 
 ## Models and integration setup
 
 | Tier | Default | Used for |
 |---|---|---|
-| STRONG | `deepseek-ai/DeepSeek-V4-Pro-0813` | brief, planner, coverage check, writer, repair |
-| FAST | `deepseek-ai/DeepSeek-V4.1-Flash-1017` | worker notes, citation verification |
+| STRONG | `deepseek-ai/DeepSeek-V4-Pro-0813` | brief, planner, coverage, writer, repair; entailment escalation |
+| FAST | `deepseek-ai/DeepSeek-V4.1-Flash-1017` | worker notes, entailment (gate 3) |
 
-These IDs were confirmed available on Token Factory with `scripts/list_models.py` on 2026-11-15. Token Factory model IDs carry version suffixes and change over time, so rerun that script if a call fails with "model not found". Both tiers are configurable in `config.py` or `.env` (`RESEARCH_STRONG_MODEL`, `RESEARCH_FAST_MODEL`). Rerun the evals and the drift gate after changing either one.
+Confirmed on Token Factory with `scripts/list_models.py`; both are configurable (`RESEARCH_STRONG_MODEL`, `RESEARCH_FAST_MODEL`). Rerun the evals and the drift gate after changing either.
 
-**Token Factory**
-- **Client:** `AsyncOpenAI(base_url="https://api.tokenfactory.nebius.com/v1")`.
-- **JSON output:** JSON mode, with a prompt-only fallback for models that reject `response_format`.
-- **Validation:** every output is validated with Pydantic. On failure the model gets one retry with the error, then a safe fallback:
-
-  | Step | Fallback |
-  |---|---|
-  | Brief | the question itself |
-  | Plan | the question as the only query |
-  | Notes | that worker is skipped |
-  | Coverage | stop with `coverage_check_failed` |
-  | Writer | `failed` |
-  | Verifier | `unsupported`, with a note |
-- **Retries:** the SDK's own retries are off. `retry.py` applies exponential backoff with jitter to transient errors (timeouts, connection errors, 429, 5xx) for both services.
-
-**Tavily (`search` and `extract` only; the `/research` endpoint is never used)**
-- **Search:** `include_domains` by tier, `start_date` set to the anchor date, `include_usage` for exact credits, basic depth in round 1 and advanced in follow-ups.
-- **Extract:** batched up to 20 URLs per call, with `query` and `chunks_per_source=3` so it returns the most relevant chunks.
-- **Credits:** recorded in `trace_events.tavily_credits` for every call and totaled per task.
-
-**Storage:** the specified schema plus:
-- oncology columns: `cancer_type`, `setting`, `anchor_date`, `trust_tier`, `source_type`, `evidence_date`, `evidence_level`, `peer_reviewed`
-- governance columns: `model_ids`, `prompt_version`, `model_id`
-- answer structure: `answer_json`, `section`, `population`, `item_date`, `notes.details`, `claim_citations.source_sentence`
-- two cache tables: `search_cache` and `extract_cache`
-
-`research.db` is versioned (`PRAGMA user_version = 3`). A v2 database is upgraded by rebuilding its extract cache (the only change); anything older is refused with a clear message rather than silently migrated.
+- **Token Factory:** `AsyncOpenAI(base_url="https://api.tokenfactory.nebius.com/v1")`, JSON mode with a prompt-only fallback, Pydantic validation with one corrective retry, then safe fallbacks (brief → the question; plan → the question as the only query; notes → worker skipped; coverage → stop `no_new_evidence`; entailment → STRONG, then `unsupported`). Up to 16,384 output tokens and 480 s per call (these models reason at length before their JSON).
+- **Retries:** SDK retries off; `retry.py` applies exponential backoff with jitter to timeouts, connection errors, 429 (honouring `Retry-After`, capped at 60 s) and 5xx, for every service.
+- **Storage:** SQLite schema v4 (`PRAGMA user_version = 4`): `sources.raw_text`, `sentences`, gate columns on `claim_citations`, claim status/verdict/labels/repair log/change type/impact, `id_cache`, `trace_events.cached_tokens`. Older databases are refused with a clear message rather than silently migrated.

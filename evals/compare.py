@@ -24,7 +24,7 @@ SHOWN = GATED + ("tier12_support_share", "preliminary_labeled_share", "insuffici
 
 
 def latest_result(results_dir: Path) -> Path | None:
-    files = sorted(results_dir.glob("*.json"))
+    files = sorted(f for f in results_dir.glob("*.json") if not f.name.startswith(("seeded-", "baseline-")))
     return files[-1] if files else None
 
 

@@ -24,7 +24,7 @@ _NUM = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+"
 _ID_RE = re.compile(r"\bPMID:?\s*\d+|\bPMCID:?\s*PMC\d+|\bPMC\d+|\bNCT\d{8}\b|\b10\.\d{4,9}/[^\s\"<>)\]]+", re.I)
 _NAME_NUM_RE = re.compile(
     r"\b(?:phase|exon|codon|stage|grade|line|cycle|cohort|part|arm|version|v)\s*"
-    r"(?:\d+[a-z]?(?:\s*/\s*\d+[a-z]?)?(?:\.\d{4})?|[ivx]+[abc]?(?:/[ivx]+[abc]?)?)\b", re.I)
+    r"(?:\d+[a-z]?(?:\s*/\s*\d+[a-z]?)?(?:\.\d+)*|[ivx]+[abc]?(?:/[ivx]+[abc]?)?)\b", re.I)
 _DATE_RES = [
     # June 1, 2025 / Jun. 1 2025
     (re.compile(rf"\b({_MONTH_RE})\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s+((?:19|20)\d{{2}})\b", re.I), "mdy"),

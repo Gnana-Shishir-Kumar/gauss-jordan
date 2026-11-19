@@ -10,3 +10,4 @@ __pycache__/
 dist/
 research.db*
 *.log
+evals/results/scratch/
