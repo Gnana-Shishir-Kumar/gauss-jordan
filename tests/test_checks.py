@@ -45,15 +45,30 @@ def test_near_duplicate_queries():
 
 
 def test_tiers_and_source_types():
-    assert tier_of("meetings.asco.org") == 1 and tier_of("www.nejm.org") == 2 and tier_of("onclive.com") == 3
-    assert tier_of("example.com") is None
+    assert tier_of("meetings.asco.org") == 3 and tier_of("asco.org") == 1 and tier_of("www.nejm.org") == 2
+    assert tier_of("onclive.com") == 4 and tier_of("example.com") is None
+    assert tier_of("nccn.org") is None and tier_of("www.nccn.org") is None  # never searched (terms of use)
+    assert classify("https://dailynews.ascopubs.org/do/x", "dailynews.ascopubs.org") == "news"
+    assert classify("https://meetings.asco.org/abstracts-presentations/1", "meetings.asco.org") == "conference_abstract"
     assert classify("https://www.fda.gov/news/x", "fda.gov") == "regulatory_action"
     assert classify("https://clinicaltrials.gov/study/NCT01", "clinicaltrials.gov") == "registry_entry"
     assert classify("https://ascopubs.org/doi/10.1200/JCO.2025.43.16_suppl.8500", "ascopubs.org") == "conference_abstract"
     assert classify("https://www.nejm.org/doi/full/10.1056/x", "nejm.org") == "peer_reviewed_article"
     assert classify("https://www.prnewswire.com/x", "prnewswire.com") == "press_release"
     assert classify("https://www.esmo.org/guidelines/lung", "esmo.org") == "guideline"
-    assert classify("https://www.cancer.gov/about-cancer", "cancer.gov") is None  # ambiguous -> worker decides
+    assert classify("https://www.cancer.gov/about-cancer", "cancer.gov") == "news"
+    assert classify("https://www.cancer.gov/types/lung/hp/nsclc-treatment-pdq", "cancer.gov") == "guideline"
+
+
+def test_trust_tiers_enforced_in_code():
+    from research_agent.sources import assign_tier
+    assert assign_tier("regulatory_action", None) == assign_tier("registry_entry", None) == 1
+    assert assign_tier("guideline", None) == 1
+    assert assign_tier("peer_reviewed_article", "confirmed") == 2
+    for status in ("title_mismatch", "not_found", "error", "no_identifier", None):  # a journal page is not proof
+        assert assign_tier("peer_reviewed_article", status) == 4
+    assert assign_tier("conference_abstract", "confirmed") == assign_tier("preprint", None) == 3
+    assert assign_tier("press_release", "confirmed") == assign_tier("news", None) == assign_tier(None, None) == 4
 
 
 @pytest.mark.parametrize("text", [

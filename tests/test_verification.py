@@ -218,7 +218,9 @@ def test_matching_source_identifier_passes(agent, conn):
     r = agent.full(FakeLLM(conn), _pubmed_search(), ids=ids)
     claim = active(r)[0]
     assert claim["citations"][0]["id_gate"]["status"] == "pass" and claim["verdict"] == "supported"
-    assert ids.calls == ["pmid:38912345"]
+    assert set(ids.calls) == {"pmid:38912345"}  # once at ingest (tier), once in gate 2 (cached in production)
+    ev = next(e for e in r["evidence"] if e["kept"])
+    assert ev["trust_tier"] == 2 and ev["id_status"] == "confirmed" and ev["identifier"] == "PMID 38912345"
 
 
 def test_identifier_service_error_is_recorded_not_failed(agent, conn):

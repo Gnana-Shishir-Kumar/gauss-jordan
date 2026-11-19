@@ -19,7 +19,9 @@ from collections.abc import Iterable
 # .4: repair drops citations that don't state the claim; bottom line rewritten from verified items only
 # .5: sentence-level evidence: notes and claims cite sentence IDs (E12-4); per-claim repair actions;
 #     one entailment verdict per claim over all cited sentences; brief date moved out of the system prompt
-PROMPT_VERSION = "onc-2026.11.5"
+# .6: brief captures the user's guideline baseline; items carry change_type and a practice-impact interpretation;
+#     conflicts must cite each side
+PROMPT_VERSION = "onc-2026.11.6"
 
 _TAG_RE = re.compile(r"</?\s*untrusted_(?:source|note)[^>]*>", re.I)
 
@@ -75,10 +77,17 @@ def evidence_index(rows: Iterable[dict]) -> str:
     return "\n".join(lines)
 
 
+def guideline_text(brief: dict) -> str:
+    parts = [brief.get("guideline_name"), brief.get("guideline_version") and f"version {brief['guideline_version']}",
+             brief.get("guideline_date") and f"dated {brief['guideline_date']}"]
+    return " ".join(p for p in parts if p) or "not stated"
+
+
 def brief_text(brief: dict) -> str:
     aspects = "\n".join(f"- {a}" for a in brief.get("aspects", []))
     return (f"Cancer type: {brief.get('cancer_type')}\nSetting: {brief.get('setting')}\n"
             f"Question: {brief.get('question')}\nSince (anchor date): {brief.get('anchor_date')}\n"
+            f"Guideline baseline (as stated by the user): {guideline_text(brief)}\n"
             f"A complete update must cover:\n{aspects}")
 
 
@@ -93,12 +102,14 @@ Extract:
 - question: the specific clinical question in one sentence.
 - anchor_date: YYYY-MM-DD if the user gave a date ("since June 2025" -> 2025-06-01) or a dated event you are sure of; otherwise null.
 - aspects: 2-6 things a complete update must cover (e.g. regulatory approvals and label changes, guideline updates, trial readouts and conference data, safety communications, trial status changes).
+- guideline_name, guideline_version, guideline_date: ONLY if the user names the guideline they are comparing against (e.g. "NCCN NSCLC", "v3.2025", "2025-01-14"); copy exactly what they wrote, otherwise null. Never guess a version or date.
 
 If the cancer type is missing or so broad that searches would be unfocused (e.g. "cancer", "solid tumors"), or no setting at all is given, set needs_clarification to true and ask ONE short clarifying question instead.
 
 Reply with only JSON:
 {{"needs_clarification": false, "clarifying_question": null, "cancer_type": "...", "setting": "...",
-  "question": "...", "anchor_date": "2025-06-01", "aspects": ["...", "..."]}}"""
+  "question": "...", "anchor_date": "2025-06-01", "aspects": ["...", "..."],
+  "guideline_name": null, "guideline_version": null, "guideline_date": null}}"""
 
 
 def brief_user(today: str, question: str) -> str:
@@ -191,8 +202,13 @@ Output sections:
   claim_type "fact" (directly stated), "inference" (drawn from combining cited sentences) or "uncertain" (thin,
   conflicting, preliminary-only or lower-trust evidence; say so in the text);
   date of the development; evidence_level in plain words ONLY as stated (e.g. "phase 3 randomized trial",
-  "regulatory decision", "expert guideline"), otherwise "not stated"; population exactly as stated, or null.
-- conflicts: items (same fields) describing where sources disagree and how.
+  "regulatory decision", "expert guideline"), otherwise "not stated"; population exactly as stated, or null;
+  change_type: one of "new approval", "new trial data", "label change", "trial status change", "guideline update",
+  "safety communication", "other";
+  impact: ONE short line on what this may mean for practice relative to the guideline baseline. It is shown labelled
+  as an interpretation; do not put new numbers in it.
+- conflicts: items (same fields) where two sources disagree on a number or recommendation: say what each source
+  states, with its date, and cite sentences from BOTH sources. Never pick one silently.
 - not_established: aspects of the brief with insufficient evidence.
 - check_before_acting: e.g. full publication pending, label wording, guideline version.
 Tier 3 sources (news, press releases) are leads only. Never put a URL or a reference in the text. If the evidence does
@@ -202,7 +218,8 @@ Reply with only JSON:
 {{"sufficient": true, "insufficiency_note": null,
   "bottom_line": {{"text": "...", "confidence": "moderate", "reason": "..."}},
   "items": [{{"text": "...", "claim_type": "fact", "sentence_ids": ["E42-7", "E42-8"], "date": "2025-06-01",
-             "evidence_level": "phase 3 randomized trial", "population": null}}],
+             "evidence_level": "phase 3 randomized trial", "population": null, "change_type": "new trial data",
+             "impact": "..."}}],
   "conflicts": [], "not_established": ["..."], "check_before_acting": ["..."]}}"""
 
 

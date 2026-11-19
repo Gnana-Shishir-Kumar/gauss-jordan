@@ -52,6 +52,13 @@ def page_for(url: str) -> str:
             f"non-small cell lung cancer. {POP_SENTENCE} {NUM_SENTENCE} Source page {url}.")
 
 
+def default_url(domain: str, query: str) -> str:
+    """Journal pages carry a DOI in the URL (as nejm.org does), so their identifier can be confirmed."""
+    if domain == "nejm.org":
+        return f"https://www.nejm.org/doi/full/10.1056/{slug(query)}"
+    return f"https://www.{domain}/{slug(query)}"
+
+
 def _domain_ok(url: str, domains: list[str]) -> bool:
     host = re.sub(r"^https?://(www\.)?", "", url).split("/")[0]
     return any(host == d or host.endswith("." + d) for d in domains)
@@ -77,8 +84,9 @@ class FakeSearch:
         self.extract_depths: list[str] = []
 
     def default_hits(self, query: str) -> list[SearchHit]:
-        return [SearchHit(url=f"https://www.{d}/{slug(query)}", title=f"{d} {query}", content=f"{query} snippet",
-                          score=0.8, published_date="2025-06-01") for d in self.domains]
+        return [SearchHit(url=default_url(d, query), title=f"Drugx trial report {slug(query)}" if d == "nejm.org"
+                          else f"{d} {query}", content=f"{query} snippet", score=0.8, published_date="2025-06-01")
+                for d in self.domains]
 
     async def search(self, query, *, depth, max_results, include_domains, start_date):
         self.search_calls.append(dict(query=query, depth=depth, include_domains=list(include_domains),
@@ -103,8 +111,9 @@ class FakeSearch:
 class FakeIds:
     """Identifier resolver: {"pmid:123": "Title", ...}; unknown identifiers are not_found."""
 
-    def __init__(self, known: dict[str, str] | None = None, error: bool = False):
+    def __init__(self, known: dict[str, str] | None = None, error: bool = False, nejm: bool = True):
         self.known = known or {}
+        self.nejm = nejm  # resolve the fake nejm.org DOIs (10.1056/<slug>) to their page titles
         self.error = error
         self.calls: list[str] = []
 
@@ -115,7 +124,55 @@ class FakeIds:
         if self.error:
             return Resolution(ident, "error", detail="service down")
         title = self.known.get(f"{ident.kind}:{ident.value}")
+        if title is None and self.nejm and ident.kind == "doi" and ident.value.startswith("10.1056/"):
+            title = f"Drugx trial report {ident.value.split('/', 1)[1]}"
         return Resolution(ident, "found", title) if title else Resolution(ident, "not_found", detail="no record")
+
+
+class FakeAPI:
+    """A structured backend (PubMed / ClinicalTrials.gov / openFDA) serving fixed texts by URL substring."""
+
+    def __init__(self, name, api, marker, texts=None, pmc=None):
+        self.name, self.api, self.marker = name, api, marker
+        self.texts = texts or {}
+        self.pmc = pmc or {}  # identifier value -> full text (PubMed Central fallback)
+        self.calls: list[str] = []
+
+    def handles(self, url):
+        return self.marker in (url or "")
+
+    async def extract(self, urls, *, depth="basic"):
+        self.calls += list(urls)
+        pages = {u: t for u in urls for k, t in self.texts.items() if k in u}
+        return ExtractResult(pages=pages, failed={u: "no record" for u in urls if u not in pages})
+
+    async def pmc_for(self, kind, value):
+        self.calls.append(f"pmc_for:{value}")
+        return f"PMC{abs(hash(value)) % 10**6}" if value in self.pmc else None
+
+    async def pmc_text(self, pmcid):
+        for v, t in self.pmc.items():
+            if pmcid == f"PMC{abs(hash(v)) % 10**6}":
+                return t
+        return None
+
+    @staticmethod
+    def approvals_url(generic):
+        return f'https://api.fda.gov/drug/drugsfda.json?search=openfda.generic_name:"{generic}"&limit=5'
+
+
+class FakeStructured:
+    def __init__(self, pubmed=None, ctgov=None, openfda=None, pmc=None):
+        self.pubmed = FakeAPI("pubmed", "pubmed", "pubmed.ncbi.nlm.nih.gov", pubmed, pmc)
+        self.ctgov = FakeAPI("ctgov", "ctgov", "clinicaltrials.gov/study/", ctgov)
+        self.openfda = FakeAPI("openfda", "openfda", "api.fda.gov/drug/drugsfda.json", openfda)
+        self.crossref = None
+
+    def for_url(self, url):
+        for b in (self.pubmed, self.ctgov, self.openfda):
+            if b.handles(url):
+                return b
+        return None
 
 
 # --- fake LLM ------------------------------------------------------------------
@@ -263,14 +320,17 @@ class Agent:
     def __init__(self, conn, settings):
         self.conn, self.settings = conn, settings
         self.ids = FakeIds()
+        self.structured = FakeStructured()
 
-    def kw(self, llm, search, settings=None, events=None, ids=None):
+    def kw(self, llm, search, settings=None, events=None, ids=None, structured=None):
         return dict(llm=llm, search=search, conn=self.conn, settings=settings or self.settings,
-                    on_event=events.append if events is not None else None, ids=ids or self.ids)
+                    on_event=events.append if events is not None else None, ids=ids or self.ids,
+                    structured=structured or self.structured)
 
     def prepare(self, llm, search, question=QUESTION, **kw):
         kw = self.kw(llm, search, **kw)
         kw.pop("ids")
+        kw.pop("structured")
         return asyncio.run(prepare(question, today=TODAY, **kw))
 
     def run(self, task_id, llm, search, **kw):

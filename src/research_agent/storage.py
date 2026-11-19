@@ -38,6 +38,16 @@ CREATE TABLE IF NOT EXISTS search_cache (key TEXT PRIMARY KEY, query TEXT, param
 CREATE TABLE IF NOT EXISTS id_cache (kind TEXT NOT NULL, ident TEXT NOT NULL, status TEXT NOT NULL, title TEXT, data TEXT, fetched_at TEXT DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (kind, ident));
 """
 
+# Columns added after v4 shipped; connect() adds them to existing v4 databases.
+_ADDITIVE_COLUMNS = [
+    ("sources", "id_status", "TEXT"),  # confirmed | title_mismatch | not_found | error | skipped | no_identifier
+    ("sources", "identifier", "TEXT"),  # e.g. "PMID 39389055", resolved title in id_title
+    ("sources", "id_title", "TEXT"),
+    ("claims", "change_type", "TEXT"),
+    ("claims", "impact", "TEXT"),
+    ("claims", "conflict_with", "TEXT"),
+]
+
 TASK_STATUSES = {
     "briefing", "needs_clarification", "awaiting_approval", "researching", "writing", "verifying",
     "done", "failed", "insufficient_evidence",
@@ -48,8 +58,9 @@ _TASK_FIELDS = {
     "anchor_date", "answer_json", "model_ids", "prompt_version", "usage",
 }
 _CLAIM_FIELDS = {"text", "claim_type", "revised", "evidence_level", "peer_reviewed", "section", "population", "item_date",
-                 "verdict", "status", "rejected", "labels", "original_text", "repair_log"}
-_JSON_CLAIM_FIELDS = ("rejected", "labels", "repair_log")
+                 "verdict", "status", "rejected", "labels", "original_text", "repair_log", "change_type", "impact",
+                 "conflict_with"}
+_JSON_CLAIM_FIELDS = ("rejected", "labels", "repair_log", "conflict_with")
 _GATES = ("number_gate", "id_gate", "entail_gate")
 
 
@@ -74,6 +85,9 @@ def connect(path: str = "research.db") -> sqlite3.Connection:
         raise SchemaMismatch(f"{path} uses an older schema (v{version}; this version needs v{SCHEMA_VERSION}, which "
                              "stores sentence-level evidence). Move it aside or delete it; a new one is created.")
     conn.executescript(SCHEMA)
+    for table, col, typ in _ADDITIVE_COLUMNS:  # columns added within v4: add if missing, never remove
+        if col not in {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
     return conn
@@ -205,6 +219,14 @@ def set_source_type(conn, source_id: int, source_type: str) -> None:
     conn.commit()
 
 
+def set_source_trust(conn, source_id: int, *, trust_tier: int, source_type: str | None = None,
+                     id_status: str | None = None, identifier: str | None = None, id_title: str | None = None) -> None:
+    conn.execute("""UPDATE sources SET trust_tier = ?, source_type = COALESCE(?, source_type), id_status = ?,
+                    identifier = ?, id_title = ? WHERE id = ?""",
+                 (trust_tier, source_type, id_status, identifier, id_title, source_id))
+    conn.commit()
+
+
 def set_source_date(conn, source_id: int, source_date: str, date_source: str) -> None:
     conn.execute("UPDATE sources SET source_date = ?, date_source = ? WHERE id = ?", (source_date, date_source, source_id))
     conn.commit()
@@ -239,7 +261,7 @@ def set_evidence_date(conn, evidence_id: int, evidence_date: str) -> None:
 
 def get_evidence(conn, task_id: int, kept_only: bool = False, ids: list[int] | None = None) -> list[dict]:
     sql = """SELECT e.*, s.url, s.domain, s.title, s.published_date, s.content_hash, s.trust_tier, s.source_type,
-                    s.source_date, s.date_source, s.retrieved_at, s.fetched_via
+                    s.source_date, s.date_source, s.retrieved_at, s.fetched_via, s.id_status, s.identifier, s.id_title
              FROM evidence e JOIN sources s ON s.id = e.source_id WHERE e.task_id = ?"""
     params: list[Any] = [task_id]
     if kept_only:
@@ -303,12 +325,13 @@ def get_notes(conn, task_id: int) -> list[dict]:
 
 def add_claim(conn, task_id: int, text: str, position: int, claim_type: str, *, section: str = "new",
               evidence_level: str | None = None, population: str | None = None, item_date: str | None = None,
-              rejected: list | None = None, labels: list | None = None) -> int:
+              rejected: list | None = None, labels: list | None = None, change_type: str | None = None,
+              impact: str | None = None) -> int:
     return _insert(conn, """INSERT INTO claims (task_id, text, position, claim_type, section, evidence_level,
-                              population, item_date, rejected, labels, original_text)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                              population, item_date, rejected, labels, original_text, change_type, impact)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                    (task_id, text, position, claim_type, section, evidence_level, population, item_date,
-                    _dumps(rejected or []), _dumps(labels or []), text))
+                    _dumps(rejected or []), _dumps(labels or []), text, change_type, impact))
 
 
 def update_claim(conn, claim_id: int, **fields: Any) -> None:
@@ -379,7 +402,7 @@ def get_claims(conn, task_id: int, ids: list[int] | None = None, include_deleted
         c["status"] = c.get("status") or "active"
         rows = conn.execute(
             """SELECT cc.*, e.excerpt, e.kept, e.drop_reason, e.evidence_date, e.source_id, s.url, s.title, s.domain,
-                      s.trust_tier, s.source_type, s.source_date, s.date_source
+                      s.trust_tier, s.source_type, s.source_date, s.date_source, s.id_status, s.identifier
                FROM claim_citations cc LEFT JOIN evidence e ON e.id = cc.evidence_id
                LEFT JOIN sources s ON s.id = e.source_id WHERE cc.claim_id = ? ORDER BY cc.evidence_id""",
             (c["id"],)).fetchall()

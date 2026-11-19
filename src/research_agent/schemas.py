@@ -81,6 +81,21 @@ class Brief(BaseModel):
     question: str = ""
     anchor_date: str | None = None
     aspects: list[str] = Field(default_factory=list)
+    # The guideline baseline is whatever the USER states (we never fetch NCCN). Checked against the question in code.
+    guideline_name: str | None = None
+    guideline_version: str | None = None
+    guideline_date: str | None = None
+
+    @field_validator("guideline_name", "guideline_version", mode="before")
+    @classmethod
+    def _gl(cls, v: Any) -> str | None:
+        s = " ".join(str(v or "").split())
+        return None if s.lower() in ("", "null", "none", "not stated", "not specified") else s
+
+    @field_validator("guideline_date", mode="before")
+    @classmethod
+    def _gl_date(cls, v: Any) -> str | None:
+        return parse_partial_date(v)
 
     @field_validator("anchor_date", mode="before")
     @classmethod
@@ -212,6 +227,11 @@ class Coverage(BaseModel):
 
 # --- writer --------------------------------------------------------------------
 
+ChangeType = Literal["new approval", "new trial data", "label change", "trial status change", "guideline update",
+                     "safety communication", "other"]
+CHANGE_TYPES: tuple[str, ...] = ChangeType.__args__  # type: ignore[attr-defined]
+
+
 class Item(BaseModel):
     text: str = Field(min_length=1)
     claim_type: ClaimType = "fact"
@@ -219,6 +239,26 @@ class Item(BaseModel):
     date: str | None = None
     evidence_level: str = "not stated"
     population: str | None = None
+    change_type: ChangeType = "other"
+    impact: str | None = None  # one-line practice-impact note; always shown as an interpretation
+
+    @field_validator("change_type", mode="before")
+    @classmethod
+    def _change(cls, v: Any) -> str:
+        s = " ".join(str(v or "").lower().replace("_", " ").split())
+        aliases = {"approval": "new approval", "regulatory approval": "new approval", "trial data": "new trial data",
+                   "trial readout": "new trial data", "trial results": "new trial data", "label update": "label change",
+                   "trial stopped": "trial status change", "trial status": "trial status change",
+                   "status change": "trial status change", "guideline change": "guideline update",
+                   "safety": "safety communication"}
+        s = aliases.get(s, s)
+        return s if s in CHANGE_TYPES else "other"
+
+    @field_validator("impact", mode="before")
+    @classmethod
+    def _impact(cls, v: Any) -> str | None:
+        s = " ".join(str(v or "").split())
+        return s or None
 
     @field_validator("sentence_ids", mode="before")
     @classmethod

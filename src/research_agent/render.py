@@ -58,19 +58,27 @@ def failed_gate(claim: dict) -> str | None:
     return None
 
 
+COMPANY_REPORTED = "company-reported, not peer-reviewed"
+PRELIMINARY = "preliminary"
+
+
 def evidence_label(claim: dict) -> str:
-    """Peer-reviewed vs preliminary label, shown inside the item itself."""
+    """Peer-reviewed / preliminary / company-reported label, shown inside the item itself. Labels set in code at
+    finalize (claims.labels) take precedence: tier 3 support is always PRELIMINARY, and an efficacy number resting only
+    on tier 4 sources is COMPANY-REPORTED."""
+    labels = claim.get("labels") or []
     cits = [c for c in claim.get("citations", []) if c.get("verdict") in SUPPORTING] or claim.get("citations", [])
-    types = [c.get("source_type") for c in cits]
-    prelim = sorted({type_label(t).lower() for t in types if is_preliminary(t)})
-    if types and all(is_preliminary(t) for t in types):
+    types = sorted({type_label(c.get("source_type")).lower() for c in cits})
+    if COMPANY_REPORTED in labels:
+        return "COMPANY-REPORTED, not peer-reviewed (" + ", ".join(types) + ")"
+    prelim = sorted({type_label(c.get("source_type")).lower() for c in cits if is_preliminary(c)})
+    if cits and all(is_preliminary(c) for c in cits):
         return f"PRELIMINARY ({', '.join(prelim)}), not peer reviewed"
     if claim.get("peer_reviewed"):
-        return "Peer-reviewed" + (f"; also cites preliminary evidence ({', '.join(prelim)})" if prelim else "")
-    if prelim:
+        return "Peer-reviewed" + (f"; also cites PRELIMINARY evidence ({', '.join(prelim)})" if prelim else "")
+    if prelim or PRELIMINARY in labels:
         return f"Includes PRELIMINARY evidence ({', '.join(prelim)}); not peer reviewed"
-    return "Not peer reviewed (" + ", ".join(sorted({type_label(t).lower() for t in types})) + ")" if types else \
-        "No verified source"
+    return "Not peer reviewed (" + ", ".join(types) + ")" if types else "No verified source"
 
 
 def cited_sentences(claim: dict) -> list[tuple[str, str]]:
@@ -82,6 +90,41 @@ def sort_items(claims: list[dict]) -> list[dict]:
     return sorted(claims, key=lambda c: (c.get("item_date") or "", -c["position"]), reverse=True)
 
 
+def review_status(claim: dict) -> str:
+    if COMPANY_REPORTED in (claim.get("labels") or []):
+        return "company-reported"
+    cits = [c for c in claim.get("citations", []) if c.get("verdict") in SUPPORTING] or claim.get("citations", [])
+    if cits and any(is_preliminary(c) for c in cits):
+        return "preliminary"
+    return "peer-reviewed" if claim.get("peer_reviewed") else "not peer-reviewed"
+
+
+def change_rows(claims: list[dict]) -> list[dict]:
+    """The "What changed" table: one row per kept 'new' item, newest first."""
+    rows = []
+    for c in sort_items([c for c in claims if c.get("section") == "new" and c.get("status") != "deleted"]):
+        tiers = sorted({x.get("trust_tier") for x in c.get("citations", []) if x.get("trust_tier")})
+        rows.append({"change": c.get("change_type") or "other", "date": c.get("item_date") or "not stated",
+                     "evidence_level": c.get("evidence_level") or "not stated",
+                     "tier": "/".join(str(t) for t in tiers) or "-", "status": review_status(c),
+                     "verified": "yes" if not is_flagged(c) else "no",
+                     "impact": f"Interpretation: {c['impact']}" if c.get("impact") else "-", "what": c["text"]})
+    return rows
+
+
+def change_table(claims: list[dict]) -> list[str]:
+    rows = change_rows(claims)
+    if not rows:
+        return ["No changes found."]
+    out = ["| Change | Date | Evidence level | Tier | Review status | Verified | Practice impact (interpretation) |",
+           "|---|---|---|---|---|---|---|"]
+    for r in rows:
+        cells = [r["change"], r["date"], r["evidence_level"], r["tier"], r["status"], r["verified"],
+                 r["impact"].removeprefix("Interpretation: ")]
+        out.append("| " + " | ".join(str(x).replace("|", "/") for x in cells) + " |")
+    return out
+
+
 def _item_lines(n: int, c: dict, anchor: str | None = None) -> list[str]:
     cits = c.get("citations", [])
     types = sorted({type_label(x.get("source_type")) for x in cits}) or ["no source"]
@@ -91,12 +134,18 @@ def _item_lines(n: int, c: dict, anchor: str | None = None) -> list[str]:
     from .engine.checks import before_anchor  # local import: engine imports this module
     if before_anchor(c.get("item_date"), anchor):
         flag += f"  [DATED BEFORE {anchor}: not new]"
+    if c.get("conflict_with"):
+        flag += "  [SOURCES DISAGREE: see section 3]"
     lines = [f"{n}. {c.get('item_date') or 'date not stated'} · {', '.join(types)} · "
              f"{', '.join(tier_label(t).split(' · ')[0] for t in tiers) or 'no tier'}{flag}",
              f"   What changed: {c['text']}  [{c['claim_type']}; {verdict.replace('_', ' ')}]",
              f"   Evidence level: {c.get('evidence_level') or 'not stated'} · {evidence_label(c)}",
              f"   Population: {c.get('population') or 'population not stated'}",
              f"   Checks: {gate_summary(c)}"]
+    if c.get("change_type"):
+        lines.insert(2, f"   Change type: {c['change_type']}")
+    if c.get("impact"):
+        lines.append(f"   Practice impact (interpretation, not a finding): {c['impact']}")
     sents = cited_sentences(c)
     if sents:
         lines.append("   Cited sentences (verbatim):")
@@ -123,14 +172,27 @@ def format_answer(task: dict, claims: list[dict], answer: dict) -> str:
     removed = [c for c in claims if c.get("status") == "deleted"]
     claims = [c for c in claims if c.get("status") != "deleted"]
     new = sort_items([c for c in claims if c.get("section") == "new"])
+    gl = brief.get("guideline_name") or brief.get("guideline_version")
+    out += ["", f"WHAT CHANGED since {anchor}" + (f" (baseline: {_guideline(brief)}, as stated by the user)" if gl else "")]
+    out += change_table(claims)
     out += ["", f"2. WHAT'S NEW SINCE {anchor} (newest first)"]
     if not new:
         out.append("No verified developments found.")
     for i, c in enumerate(new, 1):
         out += _item_lines(i, c, task.get("anchor_date"))
     conflicts = [c for c in claims if c.get("section") == "conflict"]
+    detected = answer.get("conflicts_detected") or []
     out += ["", "3. SOURCES DISAGREE"]
-    out += [line for i, c in enumerate(conflicts, 1) for line in _item_lines(i, c, task.get("anchor_date"))] or ["No conflicts found."]
+    if detected:
+        from .engine.conflicts import conflict_lines  # local import: engine imports this module
+        out.append("Found in code (tier 1-2 sources stating different values):")
+        out += conflict_lines(detected)
+    if conflicts:
+        if detected:
+            out.append("Reported by the writer:")
+        out += [line for i, c in enumerate(conflicts, 1) for line in _item_lines(i, c, task.get("anchor_date"))]
+    if not detected and not conflicts:
+        out.append("No conflicts found.")
     out += ["", "4. NOT YET ESTABLISHED"] + [f"- {x}" for x in answer.get("not_established") or ["(none listed)"]]
     out += ["", "5. CHECK BEFORE ACTING"] + [f"- {x}" for x in answer.get("check_before_acting") or ["(none listed)"]]
     if removed:
@@ -138,6 +200,12 @@ def format_answer(task: dict, claims: list[dict], answer: dict) -> str:
                 "sourced from stored evidence (see the trace)."]
     out += ["", "6. " + DISCLAIMER, USE_LIMITS]
     return "\n".join(out).strip()
+
+
+def _guideline(brief: dict) -> str:
+    parts = [brief.get("guideline_name"), brief.get("guideline_version"),
+             brief.get("guideline_date") and f"dated {brief['guideline_date']}"]
+    return " ".join(p for p in parts if p)
 
 
 def format_report(report: dict, show_trace: bool = True) -> str:
@@ -152,6 +220,8 @@ def format_report(report: dict, show_trace: bool = True) -> str:
         out += ["", "BRIEF", "-----", f"Cancer type: {brief.get('cancer_type')}", f"Setting: {brief.get('setting')}",
                 f"Question: {brief.get('question')}",
                 f"Since: {task.get('anchor_date')}" + (" (defaulted to 12 months ago)" if brief.get("anchor_defaulted") else ""),
+                "Guideline baseline: " + (_guideline(brief) or "not stated")
+                + (" (user-supplied; guideline sites such as NCCN are never fetched)" if _guideline(brief) else ""),
                 "Aspects: " + "; ".join(brief.get("aspects", []))]
     if task.get("final_answer"):
         out += ["", "UPDATE BRIEF", "------------", task["final_answer"]]

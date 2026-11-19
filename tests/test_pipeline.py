@@ -50,7 +50,7 @@ def test_normal_run(agent, conn):
         assert NUM_SENTENCE in texts  # read back from the evidence store, verbatim
         assert all(x["id"].startswith(f"E{c['citations'][0]['evidence_id']}-") for x in c["citations"][0]["sentences"])
         g = c["citations"][0]
-        assert g["number_gate"]["status"] == "pass" and g["id_gate"]["status"] == "n/a"
+        assert g["number_gate"]["status"] == "pass" and g["id_gate"]["status"] in ("n/a", "pass")
         assert g["entail_gate"]["status"] == "supported"
     assert {c["citations"][0]["source_type"] for c in claims} <= {"regulatory_action", "peer_reviewed_article"}
     ans = t["final_answer"]
@@ -149,7 +149,7 @@ def test_batched_extraction_uses_at_most_20_urls_per_call(agent, conn):
     search = FakeSearch(domains=domains)
     r = agent.full(FakeLLM(conn), search, settings=settings)
     assert [len(c) for c in search.extract_calls] == [20, 5]
-    extract_credits = [t["tavily_credits"] for t in trace_steps(r, "extract")]
+    extract_credits = [t["tavily_credits"] for t in trace_steps(r, "extract") if t["tavily_credits"] is not None]
     assert extract_credits == [4.0, 1.0]
 
 
