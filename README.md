@@ -18,14 +18,16 @@ This agent takes the question and the guideline baseline the clinician is workin
 
 ## Why this topic
 
+**June 1, 2024 → August 19, 2024.** Eleven weeks after the guideline date in our example, the FDA approved a new first-line treatment for EGFR-mutant lung cancer, lazertinib plus amivantamab. The approval came with a safety warning: give blood thinners for the first four months, because of a serious clot risk. An oncologist working from the June guideline needs both facts, and needs to know they come from the FDA, not from a press release. When we asked a plain search + LLM pipeline the same question, 4 of its 5 claims rested only on news sites, including the trial's efficacy numbers.
+
+That is the gap this agent is built for: real changes that arrive between guideline versions, mixed in with news, with no quick way to tell which is which.
+
 The challenge asks for a research agent that brings its sources. We picked oncology because it is where unchecked sources do the most harm, and where checking them can be done well:
 
 - **Mistakes are costly, and they are mostly numbers.** A wrong hazard ratio, a median from the wrong trial arm, a stale approval date or a press release read as a regulatory decision can change a treatment discussion. Oncology claims are numeric (PFS, OS, HR, confidence intervals, sample sizes, dates), so they can be checked *in code* against the exact sentence they came from. That is what gate 1 does, and it catches most errors without an LLM call.
 - **Changes come from many kinds of source at once.** Approvals and label changes (FDA, EMA), trial status changes (ClinicalTrials.gov), guideline updates (ESMO, ASCO), conference readouts and journal papers all move on their own schedules. A PubMed-only tool misses regulatory and registry changes; a news feed or a general search answer mixes them without saying which is which. Covering them needs an agent: plan, search by source type, check coverage, and stop with a stated reason.
 - **The question has a natural, checkable boundary.** Every oncologist works from a guideline version with a date. "What changed since my version?" is therefore a dated question, and "new since" can be enforced in code: items dated before the anchor are flagged, not shown as new.
 - **The user needs triage, not a replacement for reading.** The brief says which sources changed and quotes the sentence behind every number, so the clinician gets to the primary source faster and can check it.
-
-<!-- TEAM: add one or two lines on your own reason for choosing oncology (e.g. a clinician you spoke to, or a personal connection). -->
 
 ### What expert feedback changed
 
