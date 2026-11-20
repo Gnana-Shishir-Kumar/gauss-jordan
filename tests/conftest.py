@@ -94,7 +94,8 @@ class FakeSearch:
         if query in self.fail:
             raise self.fail[query]
         hits = [] if self.empty else self.results.get(query, self.default_hits(query))
-        hits = [h for h in hits if _domain_ok(h.url, include_domains)]  # Tavily restrict mode
+        if include_domains:  # Tavily restrict mode; no list means no domain filter
+            hits = [h for h in hits if _domain_ok(h.url, include_domains)]
         return SearchResult(hits=hits[:max_results], credits=2.0 if depth == "advanced" else 1.0)
 
     async def extract(self, urls, *, depth="basic"):

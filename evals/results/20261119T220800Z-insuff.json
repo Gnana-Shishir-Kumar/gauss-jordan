@@ -1,0 +1,107 @@
+{
+  "run_at": "20261119T220800Z-insuff",
+  "model_ids": {
+    "strong": "deepseek-ai/DeepSeek-V4-Pro-0813",
+    "fast": "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+  },
+  "prompt_version": "onc-2026.11.6",
+  "limits": {
+    "min_queries": 3,
+    "max_queries_per_round": 5,
+    "max_follow_ups_per_aspect": 1,
+    "max_repair_rounds": 2,
+    "search_results": 10,
+    "extract_per_query": 2,
+    "extract_per_round": 10,
+    "extract_batch_size": 20,
+    "min_independent_sources": 2,
+    "min_relevance": 0.15,
+    "sentences_per_source": 14,
+    "sentence_chars_per_source": 2600,
+    "near_duplicate_threshold": 0.7,
+    "max_notes_for_writer": 40,
+    "max_concurrency": 5,
+    "round1_tiers": [
+      1,
+      2
+    ],
+    "follow_up_tiers": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "round1_depth": "advanced",
+    "follow_up_depth": "advanced",
+    "chunks_per_source": 3,
+    "max_research_rounds": 4,
+    "repair_search_results": 5,
+    "repair_extract_per_search": 2,
+    "default_anchor_days": 365
+  },
+  "budget": {
+    "time_s": 420.0,
+    "tavily_calls": 20,
+    "tavily_repair_reserve": 4,
+    "pubmed_calls": 60,
+    "ctgov_calls": 40,
+    "openfda_calls": 20,
+    "crossref_calls": 40
+  },
+  "summary": {
+    "citation_support_rate": null,
+    "numeric_check_pass_rate": null,
+    "tier12_support_share": null,
+    "preliminary_labeled_share": null,
+    "insufficient_evidence_accuracy": 100.0,
+    "questions": 1,
+    "avg_credits": 29.0,
+    "avg_latency_s": 224.7,
+    "avg_input_tokens": 17832,
+    "avg_output_tokens": 14449,
+    "counts": {
+      "supported_citations": 0,
+      "checked_citations": 0,
+      "numeric_passed": 0,
+      "numeric_checked": 0,
+      "tier12_supported_claims": 0,
+      "supported_claims": 0,
+      "preliminary_labeled": 0,
+      "preliminary_claims": 0,
+      "insufficient_correct": 1,
+      "questions": 1,
+      "credits": 29.0,
+      "input_tokens": 17832,
+      "output_tokens": 14449
+    }
+  },
+  "questions": [
+    {
+      "id": "insuff-meso-tqx",
+      "cancer_type": "mesothelioma",
+      "question": "What has changed for the investigational agent TQX-9182 in second-line pleural mesothelioma since 2025-01-01?",
+      "expect_insufficient": true,
+      "task_id": 1,
+      "status": "insufficient_evidence",
+      "stop_reason": "quota_reached",
+      "latency_s": 224.7,
+      "counts": {
+        "supported_citations": 0,
+        "checked_citations": 0,
+        "numeric_passed": 0,
+        "numeric_checked": 0,
+        "tier12_supported_claims": 0,
+        "supported_claims": 0,
+        "preliminary_labeled": 0,
+        "preliminary_claims": 0,
+        "insufficient_correct": 1,
+        "questions": 1,
+        "credits": 29.0,
+        "input_tokens": 17832,
+        "output_tokens": 14449
+      },
+      "clinician_rating": null,
+      "clinician_notes": null
+    }
+  ]
+}

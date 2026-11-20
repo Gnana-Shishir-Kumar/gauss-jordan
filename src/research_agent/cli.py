@@ -72,7 +72,11 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     settings = get_settings()
-    conn = storage.connect(args.db or settings.db_path)
+    try:
+        conn = storage.connect(args.db or settings.db_path)
+    except storage.SchemaMismatch as exc:
+        print(f"{exc}\nOr point RESEARCH_DB_PATH (or --db) at a new file.", file=sys.stderr)
+        return 1
 
     def finish(report: dict) -> int:
         print(format_report(report, show_trace=not args.no_trace))

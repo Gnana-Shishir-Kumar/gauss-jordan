@@ -1,0 +1,35 @@
+{
+  "run_at": "20261119T204445Z-live12",
+  "model_ids": {
+    "strong": "deepseek-ai/DeepSeek-V4-Pro-0813",
+    "fast": "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+  },
+  "prompt_version": "onc-2026.11.6",
+  "summary": {
+    "citation_support_rate": 100.0,
+    "numeric_check_pass_rate": 95.5,
+    "tier12_support_share": 64.2,
+    "preliminary_labeled_share": null,
+    "insufficient_evidence_accuracy": 100.0,
+    "questions": 12,
+    "avg_credits": 21.67,
+    "avg_latency_s": 741.6,
+    "avg_input_tokens": 38953,
+    "avg_output_tokens": 57621,
+    "counts": {
+      "supported_citations": 177,
+      "checked_citations": 177,
+      "numeric_passed": 107,
+      "numeric_checked": 112,
+      "tier12_supported_claims": 88,
+      "supported_claims": 137,
+      "preliminary_labeled": 0,
+      "preliminary_claims": 0,
+      "insufficient_correct": 12,
+      "questions": 12,
+      "credits": 260.0,
+      "input_tokens": 467436,
+      "output_tokens": 691447
+    }
+  }
+}

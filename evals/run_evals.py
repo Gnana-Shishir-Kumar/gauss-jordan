@@ -58,19 +58,30 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--questions", default=str(HERE / "questions.jsonl"))
     p.add_argument("--limit", type=int)
+    p.add_argument("--offset", type=int, default=0, help="skip the first N questions (to split a run into shards)")
+    p.add_argument("--tavily-calls", type=int, help="per-brief Tavily call budget (default from config)")
+    p.add_argument("--repair-reserve", type=int, help="of which reserved for repair")
+    p.add_argument("--tag", default="", help="suffix for the result files (e.g. shard name)")
     p.add_argument("--out-dir", default=str(HERE / "results"))
     args = p.parse_args(argv)
 
     settings = get_settings()
+    if args.tavily_calls is not None or args.repair_reserve is not None:
+        from dataclasses import replace
+        b = settings.budget
+        settings = replace(settings, budget=replace(
+            b, tavily_calls=args.tavily_calls if args.tavily_calls is not None else b.tavily_calls,
+            tavily_repair_reserve=args.repair_reserve if args.repair_reserve is not None else b.tavily_repair_reserve))
     try:
         llm, search = default_clients(settings)
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    questions = load_questions(Path(args.questions))[: args.limit]
+    questions = load_questions(Path(args.questions))[args.offset:]
+    questions = questions[: args.limit] if args.limit else questions
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + (f"-{args.tag}" if args.tag else "")
     conn = storage.connect(str(out_dir / f"{stamp}.db"))
     print(f"Running {len(questions)} questions (prompt {PROMPT_VERSION})", file=sys.stderr)
     rows = asyncio.run(run_questions(questions, llm=llm, search=search, conn=conn, settings=settings))

@@ -154,7 +154,8 @@ def get_settings(env_file: str | Path = ".env") -> Settings:
     defaults = Models()
     return Settings(
         models=Models(
-            strong=os.environ.get("RESEARCH_STRONG_MODEL", defaults.strong),
+            # NEBIUS_MODEL is the hackathon template's variable name; it sets the STRONG tier if given.
+            strong=os.environ.get("RESEARCH_STRONG_MODEL") or os.environ.get("NEBIUS_MODEL") or defaults.strong,
             fast=os.environ.get("RESEARCH_FAST_MODEL", defaults.fast),
         ),
         db_path=os.environ.get("RESEARCH_DB_PATH", "research.db"),
