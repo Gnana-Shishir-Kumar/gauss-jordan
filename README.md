@@ -4,7 +4,7 @@
 
 **One-line pitch:** For a practicing oncologist, "what has changed for this clinical question since my guideline version?" answered as a dated brief in which every claim quotes the exact stored sentences it rests on and passes three verification gates (numbers in code, PMID/NCT/DOI resolution, entailment) before it is shown as verified.
 
-**Demo video (2–3 min):** <!--DEMO_LINK-->_link to be added_
+**Demo video (2:26):** [youtu.be/LE8VsPvydoc](https://youtu.be/LE8VsPvydoc)
 
 **Team:** [@Gnana-Shishir-Kumar](https://github.com/Gnana-Shishir-Kumar) · [@pjsk02](https://github.com/pjsk02)
 
@@ -158,7 +158,7 @@ All numbers below come from live runs on 2026-11-18 and 2026-11-19, saved in `ev
 - **What we built:** web UI, CLI (`research` or `python src/agent.py`), a Docker image with a password gate and an optional HTTPS profile, a SQLite trace written after every step, and `--resume` for runs that fail after research.
 - **Evidence:** 12 / 12 live eval briefs finished `done` on real Token Factory and Tavily calls; a live insufficient-evidence run; 168 mocked tests pass in about 4 s, plus an optional live smoke test.
 - **Gaps:** a brief takes about 10–12 minutes (one took 51 minutes because of slow LLM calls); no CI workflow yet.
-- **Where to look:** [Setup](#setup), [Run](#run), [Deploy](#deploy-to-the-cloud-container-on-a-vm-eg-nebius-ai-cloud), the demo video.
+- **Where to look:** [Setup](#setup), [Run](#run), [Deploy](#deploy-to-the-cloud-container-on-a-vm-eg-nebius-ai-cloud), the [demo video](https://youtu.be/LE8VsPvydoc).
 
 ### Usefulness (20%)
 - **What we built:** a dated What-changed table measured from the guideline version the clinician works from (change type, date, evidence level, tier, review status, verified), quoted source sentences, a "Check before acting" list, and CSV / RIS export for Zotero or EndNote.
