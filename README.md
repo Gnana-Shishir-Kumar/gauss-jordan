@@ -16,6 +16,29 @@ Oncology changes faster than guidelines are reissued. Between versions, an oncol
 
 This agent takes the question and the guideline baseline the clinician is working from (name, version, date; supplied by the user, never scraped), searches regulators, registries, guideline publishers, journals, conferences and news on or after that date, and returns a "What changed" table plus items that each quote their source sentences, show their trust tier and evidence level, and state which verification gates they passed. When the evidence is not there it says so instead of filling the gap.
 
+## Why this topic
+
+The challenge asks for a research agent that brings its sources. We picked oncology because it is where unchecked sources do the most harm, and where checking them can be done well:
+
+- **Mistakes are costly, and they are mostly numbers.** A wrong hazard ratio, a median from the wrong trial arm, a stale approval date or a press release read as a regulatory decision can change a treatment discussion. Oncology claims are numeric (PFS, OS, HR, confidence intervals, sample sizes, dates), so they can be checked *in code* against the exact sentence they came from. That is what gate 1 does, and it catches most errors without an LLM call.
+- **Changes come from many kinds of source at once.** Approvals and label changes (FDA, EMA), trial status changes (ClinicalTrials.gov), guideline updates (ESMO, ASCO), conference readouts and journal papers all move on their own schedules. A PubMed-only tool misses regulatory and registry changes; a news feed or a general search answer mixes them without saying which is which. Covering them needs an agent: plan, search by source type, check coverage, and stop with a stated reason.
+- **The question has a natural, checkable boundary.** Every oncologist works from a guideline version with a date. "What changed since my version?" is therefore a dated question, and "new since" can be enforced in code: items dated before the anchor are flagged, not shown as new.
+- **The user needs triage, not a replacement for reading.** The brief says which sources changed and quotes the sentence behind every number, so the clinician gets to the primary source faster and can check it.
+
+<!-- TEAM: add one or two lines on your own reason for choosing oncology (e.g. a clinician you spoke to, or a personal connection). -->
+
+### What expert feedback changed
+
+A research biologist reviewed an early version on 2026-11-16. Their objections and what we changed in response:
+
+| Objection | What we changed |
+|---|---|
+| "Scientists go to the source and read the design, the details and the graphs themselves." | We narrowed the user to **practicing clinicians** who need triage between guideline versions, and we state the limit plainly in the UI, CLI and README: page text only; figures, image tables and supplements are not read. |
+| "An AI checking an AI summary may not add much." | We made the **deterministic checks the main defence**: numbers verified in code (gate 1), PMIDs, NCT numbers and DOIs resolved against PubMed, ClinicalTrials.gov and Crossref (gate 2), and tier rules applied in code. The LLM entailment judge (gate 3) is the last layer. In the [seeded-error eval](#seeded-error-eval), code checks caught 211 of the 237 planted errors and the entailment model caught 25 more (mostly swapped citations and numbers taken from the wrong trial arm); 1 was missed. |
+| "People can already code a newsfeed. What makes this better?" | Anchor-date filtering, trust tiers assigned in code, independent sources counted by site, PRELIMINARY and company-reported labels, conflicting sources shown side by side, and a quoted sentence behind every number. We also **measured** the difference with a [plain search + LLM baseline](#baseline-comparison-for-the-demo): 4 of its 5 claims rested only on news sites. |
+
+One suggestion from that review is still open: extracting each trial's design details (sample size, comparator, primary endpoint, follow-up). See [Limitations](#limitations).
+
 ## How it works
 
 ```
@@ -30,7 +53,7 @@ question (+ guideline baseline) → identifier check → brief → plan queries 
 - **Query planning:** the STRONG model writes a brief (cancer type, setting, anchor date, 2–6 aspects a complete answer must cover) and 3–5 queries. Round 1 searches tier 1–2 domains only (regulators, registries, guideline publishers, journals) at advanced depth from the anchor date; a coverage check (independence counted in code as distinct sites) asks for at most one follow-up per thin aspect, adding conference and news domains. Research stops with one of four printed reasons: `coverage_complete`, `no_new_evidence`, `quota_reached`, `time_budget`.
 - **Evidence handling:** full page text is stored once per source and split into numbered sentences; workers see only the most relevant sentences with their IDs and return short notes citing them. The writer never sees page text. Every claim must cite stored sentence IDs; anything else (unknown IDs, invented URLs) is rejected in code. Each claim then passes three gates (details below), and failed claims are repaired one at a time: re-cite, one targeted search from a reserved quota, delete, or mark unverified. Trust tiers are assigned in code: a journal page counts as peer-reviewed only if its PMID/DOI resolves to the same title; an efficacy number resting only on press releases or news is tagged company-reported. Tier 1–2 sources that disagree are shown side by side.
 - **Safety:** clinician-facing only, with the use limits above; an input check blocks patient identifiers before anything is stored; web text is wrapped as untrusted data and can never change instructions or trigger actions; NCCN is never accessed; practice-impact notes are labelled as interpretations; confidence is capped when evidence is preliminary or sources disagree; every step is traced in SQLite with model ID and prompt version.
-- **Trade-offs:** verification costs time and tokens (about 12 minutes and 28 Tavily credits for a typical brief, most of it reasoning-heavy LLM calls); page text only, so figures and supplements are not read; deterministic checks are deliberately strict, so some true statements are flagged rather than any wrong number being shown as verified; news-only items are kept but shown as uncertain rather than dropped, because they are often the first signal of a change.
+- **Trade-offs:** verification costs time and tokens (about 10–12 minutes and 22–28 Tavily credits per brief, most of the time in reasoning-heavy LLM calls; 28 credits in the EGFR example at the default 40-call budget, 21.7 on average in the evals, which capped each brief at 20 calls); page text only, so figures and supplements are not read; deterministic checks are deliberately strict, so some true statements are flagged rather than any wrong number being shown as verified; news-only items are kept but shown as uncertain rather than dropped, because they are often the first signal of a change.
 
 ## Required services
 
@@ -42,16 +65,27 @@ question (+ guideline baseline) → identifier check → brief → plan queries 
 
 ## Setup
 
+**You need:** Python **3.11 or newer** (check with `python3 --version`; macOS ships 3.9, and the uv route below installs a suitable Python for you), a Nebius Token Factory API key and a Tavily API key.
+
 ```bash
 git clone https://github.com/Gnana-Shishir-Kumar/gauss-jordan.git && cd gauss-jordan
-python -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
+python3 -m venv .venv && source .venv/bin/activate     # must be Python 3.11+; Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env                                   # set NEBIUS_API_KEY and TAVILY_API_KEY
 python src/agent.py "What has changed for first-line EGFR-mutant metastatic NSCLC since 2024-06-01?" --yes
-streamlit run app/streamlit_app.py                     # web UI
+streamlit run app/streamlit_app.py                     # web UI at http://localhost:8501
 ```
 
-With [uv](https://docs.astral.sh/uv/): `uv sync`, then `uv run research "..."` and `uv run streamlit run app/streamlit_app.py`. `python scripts/list_models.py` confirms the model IDs exist on Token Factory. Keys are read only from the environment and never logged.
+**With [uv](https://docs.astral.sh/uv/)** (recommended; it downloads Python 3.11+ if your system has an older one):
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh        # then open a new terminal so `uv` is on PATH
+uv sync
+uv run research "What has changed for first-line EGFR-mutant metastatic NSCLC since 2024-06-01?" --yes
+uv run streamlit run app/streamlit_app.py
+```
+
+`python scripts/list_models.py` (or `uv run python scripts/list_models.py`) confirms the model IDs exist on Token Factory. Keys are read only from the environment and never logged. A full brief takes about 10–12 minutes; the UI and the CLI show live progress while it runs.
 
 ## Example
 
@@ -97,15 +131,66 @@ The same brief also listed 8 developments that rest only on news or press releas
 
 No bottom line is produced without verified items, and the CLI exits with code 3. Other failure paths are handled the same way: a question with patient identifiers is blocked before anything is stored (exit 6); a question too vague to search returns one clarifying question (exit 4); claims whose numbers cannot be sourced are removed and listed under "Removed during verification"; a run that fails after research can be resumed (`--resume`).
 
-## Judging criteria map
+## How we meet the judging criteria
 
-| Criterion | Weight | Where to look |
+All numbers below come from live runs on 2026-11-18 and 2026-11-19, saved in `evals/results/`.
+
+| Criterion | Weight | Headline evidence |
 |---|---|---|
-| Sourced and verifiable answers | 30% | [Example](#example), [The three verification gates](#the-three-verification-gates), [Seeded-error eval](#seeded-error-eval) |
-| Works end to end | 25% | [Setup](#setup), demo, live runs in [Evals](#evals) |
-| Usefulness | 20% | [The problem](#the-problem), the What-changed table, [Baseline comparison](#baseline-comparison-for-the-demo) |
-| Agent design | 15% | [How it works](#how-it-works), [Architecture](#architecture), [Bounded repair loop](#bounded-repair-loop) |
-| Use of Token Factory and Tavily | 10% | [Required services](#required-services), [Why Tavily discovers and structured APIs give ground truth](#why-tavily-discovers-and-structured-apis-give-ground-truth), [Token, cost and latency summary](#token-cost-and-latency-summary) |
+| Sourced and verifiable answers | 30% | 137 / 137 claims verified in 12 live briefs; 237 planted errors, 99.6% caught, 0 false alarms |
+| Works end to end | 25% | 12 / 12 live briefs finished; web UI, CLI and Docker; 168 tests pass |
+| Usefulness | 20% | dated What-changed table from the clinician's guideline version; 64.2% of verified claims rest on tier 1–2 sources |
+| Agent design | 15% | plan → approve → research → coverage check → stated stop reason → write → 3 gates → bounded repair |
+| Use of Token Factory and Tavily | 10% | every LLM call on Token Factory (two model tiers); all discovery through Tavily Search and Extract |
+
+### Sourced and verifiable answers (30%)
+- **What we built:** every claim must cite stored sentence IDs, checked in code; three gates per claim (numbers in code, identifiers resolved, entailment); per-claim repair; trust tiers assigned in code; conflicting sources shown side by side; `insufficient_evidence` instead of guessing.
+- **Evidence:**
+  - 12 live briefs: 137 / 137 claims verified, 177 / 177 citations supported; all 8 first-pass gate failures fixed by repair.
+  - Seeded-error eval: 237 planted errors, 99.6% caught, 100% precision, 0% false alarms on 60 clean claims, 0 errors left shown as verified after repair.
+  - A fictional drug ends `insufficient_evidence` with no bottom line (CLI exit code 3).
+- **Gaps:** page text only, so figures and supplements are not checked; one changed biomarker name (HER2 → HER5) got past the gates.
+- **Where to look:** [Example](#example), [The three verification gates](#the-three-verification-gates), [Seeded-error eval](#seeded-error-eval), [Failure case](#failure--insufficient-evidence-case).
+
+### Works end to end (25%)
+- **What we built:** web UI, CLI (`research` or `python src/agent.py`), a Docker image with a password gate and an optional HTTPS profile, a SQLite trace written after every step, and `--resume` for runs that fail after research.
+- **Evidence:** 12 / 12 live eval briefs finished `done` on real Token Factory and Tavily calls; a live insufficient-evidence run; 168 mocked tests pass in about 4 s, plus an optional live smoke test.
+- **Gaps:** a brief takes about 10–12 minutes (one took 51 minutes because of slow LLM calls); no CI workflow yet.
+- **Where to look:** [Setup](#setup), [Run](#run), [Deploy](#deploy-to-the-cloud-container-on-a-vm-eg-nebius-ai-cloud), the demo video.
+
+### Usefulness (20%)
+- **What we built:** a dated What-changed table measured from the guideline version the clinician works from (change type, date, evidence level, tier, review status, verified), quoted source sentences, a "Check before acting" list, and CSV / RIS export for Zotero or EndNote.
+- **Evidence:**
+  - 12 briefs across 10 cancer types: 64.2% of verified claims rest on a tier 1–2 source, and 15 efficacy numbers that rested only on news or press releases were tagged company-reported.
+  - A plain search + LLM answer to the same question rested 4 of its 5 claims on news sites alone.
+- **Gaps:** no practicing oncologist has rated the briefs yet (the `clinician_rating` fields in `evals/questions.jsonl` are empty); trial design details are not extracted per item.
+- **Where to look:** [The problem](#the-problem), [Why this topic](#why-this-topic), [Baseline comparison](#baseline-comparison-for-the-demo).
+
+### Agent design (15%)
+- **What we built:** brief → plan → human approval → parallel research workers → coverage check with independence counted in code → one of four stated stop reasons → writer that sees notes only → three gates → bounded per-claim repair (max 2 rounds) → tier rules in code. Web text is wrapped as untrusted data and can never change instructions.
+- **Evidence:** all four stop reasons occurred in live runs (5 `quota_reached`, 4 `time_budget`, 2 `coverage_complete`, 1 `no_new_evidence`); repair fixed all 8 first-pass failures with re-cites.
+- **Gaps:** only 2 of 12 briefs reached `coverage_complete`; most stopped on the time or call budget.
+- **Where to look:** [How it works](#how-it-works), [Architecture](#architecture), [Bounded repair loop](#bounded-repair-loop), [Searching, quotas and stop reasons](#searching-quotas-and-stop-reasons).
+
+### Use of Token Factory and Tavily (10%)
+- **What we built:**
+  - Token Factory runs every LLM call on two tiers: DeepSeek V4 Pro for planning, writing and repair, and V4.1 Flash for notes and entailment. Prompts are ordered for cached input pricing.
+  - Tavily Search runs with explicit depth, domain and date filters and `auto_parameters` off; Tavily Extract gets full page text; `/research` is never used.
+  - PubMed, ClinicalTrials.gov, openFDA and Crossref only verify what Tavily found.
+- **Evidence:** a cost-by-step table on every brief; 21.7 Tavily credits on average per eval brief; 17–25% of input tokens cached on the notes, coverage and verify steps.
+- **Gaps:** these reasoning-heavy models make the notes and coverage steps slow (about 470 s of the 12-minute EGFR run).
+- **Where to look:** [Required services](#required-services), [Why Tavily discovers and structured APIs give ground truth](#why-tavily-discovers-and-structured-apis-give-ground-truth), [Token, cost and latency summary](#token-cost-and-latency-summary).
+
+## Limitations
+
+- **Page text only.** Figures, image tables and supplements are not read, so a number that appears only in a figure is never shown as verified.
+- **No per-item trial design details yet.** Items show evidence level and population when a cited sentence states them, but not sample size, comparator, primary endpoint or follow-up. This was suggested in the [expert review](#what-expert-feedback-changed) and is still open.
+- **Slow.** A brief takes about 10–12 minutes, mostly in reasoning-heavy LLM calls, and most briefs stop on the time or call budget rather than at full coverage.
+- **News-only items stay in the brief,** shown as uncertain, because they are often the first signal of a change. Treat them as leads to check.
+- **Strict number checks** sometimes flag true statements, for example a value phrased differently from its source. Those claims are repaired or marked unverified rather than shown as verified.
+- **Changed biomarker names** (for example HER2 → HER5) are a known blind spot: gate 1 ignores gene and drug names by design, and the entailment judge accepted one in the seeded eval.
+- **Not yet rated by clinicians.** The eval set has fields for a practicing oncologist's rating; none are filled in yet.
+- **No CI.** Tests run locally with `uv run pytest`; there is no GitHub Actions workflow.
 
 ## License
 
@@ -125,17 +210,20 @@ uv run research "What changed for first-line EGFR-mutant NSCLC?" \
 uv run research --run 12          # approve a prepared task later
 uv run research --resume 12       # re-run writing + verification for a task that failed after research
 uv run research --show 12 --export ris --out sources.ris
+uv run research "..." --quiet --no-trace --db other.db   # no live progress, no trace in the report, another database
 
 # Web UI (guideline baseline fields under the question box)
 uv run streamlit run app/streamlit_app.py
 ```
+
+In the web UI, type the question, optionally fill in the guideline baseline (name, version, version date), and click **Prepare brief**. Review the brief and planned searches, then click **Start research**; tick **Start research automatically** to skip the review step. Past runs are listed under **Recent briefs** in the sidebar, and a page refresh does not interrupt a running brief.
 
 CLI exit codes: 0 done · 1 failed · 2 missing keys · 3 insufficient evidence · 4 needs clarification · 5 not approved · 6 identifiers detected.
 
 **Tests and evals:**
 
 ```bash
-uv run pytest                    # mocked tests, no network
+uv run pytest                    # 168 mocked tests, no network, about 4 s
 uv run pytest -m live -s         # optional live smoke test
 uv run python evals/run_evals.py # eval questions, live (--offset/--limit/--tavily-calls to shard and cap)
 uv run python evals/compare.py   # drift gate against evals/baseline.json
@@ -364,9 +452,9 @@ Notes, honestly:
 
 ### Live eval questions and drift gate
 
-`evals/questions.jsonl` holds 15 "what's changed" questions across 12 cancer types (three use fictional drug codes and should end `insufficient_evidence`). `evals/run_evals.py` runs them live into a fresh database and saves `evals/results/<stamp>.json` with citation support rate, number-check pass rate, tier 1–2 support share, preliminary-label share, insufficient-evidence accuracy, and average credits, latency and tokens. `evals/compare.py` exits 1 if a gated metric drops by more than 3 points against `evals/baseline.json` (`--set-baseline` accepts a run).
+`evals/questions.jsonl` holds 15 "what's changed" questions across 13 cancer types (three use fictional drug codes and should end `insufficient_evidence`; the TQX-9182 one was run live, see [Failure case](#failure--insufficient-evidence-case), and the other two have not been run live yet). `evals/run_evals.py` runs them live into a fresh database and saves `evals/results/<stamp>.json` with citation support rate, number-check pass rate, tier 1–2 support share, preliminary-label share, insufficient-evidence accuracy, and average credits, latency and tokens. `evals/compare.py` exits 1 if a gated metric drops by more than 3 points against `evals/baseline.json` (`--set-baseline` accepts a run).
 
-Live run on 2026-11-19: the 12 answerable questions (11 cancer types), each capped at 20 Tavily calls (4 reserved for repair), run as three parallel shards. Results: `evals/results/20261119T204445Z-shard{0,4,8}.json`.
+Live run on 2026-11-19: the 12 answerable questions (10 cancer types), each capped at 20 Tavily calls (4 reserved for repair), run as three parallel shards. Results: `evals/results/20261119T204445Z-shard{0,4,8}.json`.
 
 | Metric | Result |
 |---|---|
@@ -379,9 +467,9 @@ Live run on 2026-11-19: the 12 answerable questions (11 cancer types), each capp
 | Efficacy numbers tagged company-reported (tier 4 only) | 15 |
 | Kept sources by tier | 56 tier 1 · 55 tier 2 · 2 tier 3 · 76 tier 4 |
 | Stop reasons | 5 `quota_reached`, 4 `time_budget`, 2 `coverage_complete`, 1 `no_new_evidence` |
-| Average per brief | **21.7 Tavily credits**, 38,953 input / 57,621 output tokens, 742 s (median about 9 min; one brief took 51 min because of slow LLM calls) |
+| Average per brief | **21.7 Tavily credits**, 38,953 input / 57,621 output tokens, 742 s (median about 10 min; one brief took 51 min because of slow LLM calls) |
 
-The drift gate (`evals/compare.py`) gates citation support rate and number-check pass rate; set this run as the baseline with `--set-baseline --latest <file>`.
+`evals/baseline.json` is set to this run, so the drift gate (`evals/compare.py`) checks later runs against it on citation support rate and number-check pass rate. Accept a new run as the baseline with `--set-baseline --latest <file>`.
 
 ### Baseline comparison (for the demo)
 

@@ -11,7 +11,8 @@ DISCLAIMER = (
 )
 USE_LIMITS = (
     "Use limits: clinician-facing only; not for patients; not for urgent or time-critical decisions; does not use "
-    "patient data; summarizes published and public information for independent review."
+    "patient data; reads page text only (figures, image tables and supplements are not read); summarizes published "
+    "and public information for independent review."
 )
 NO_IDENTIFIERS = "Do not enter patient identifiers (names, record numbers, dates of birth). Ask about the clinical topic."
 

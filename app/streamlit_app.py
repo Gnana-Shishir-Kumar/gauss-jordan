@@ -9,10 +9,15 @@ from __future__ import annotations
 import asyncio
 import hmac
 import os
+import sys
 import threading
 import time
+from pathlib import Path
 
 import streamlit as st
+
+# Make the package importable without installing it (pip install -r requirements.txt is enough), as src/agent.py does.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from research_agent import storage
 from research_agent.config import Settings, get_settings

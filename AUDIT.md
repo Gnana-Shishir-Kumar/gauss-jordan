@@ -1,5 +1,7 @@
 # Repository audit: gauss-jordan (Oncology Update Briefs)
 
+> **Historical document.** This is the handoff audit from 2026-11-16, kept as a record of what was found and fixed. Much of it is now out of date: the sentence-level evidence, three-gate verifier, four trust tiers, live evals, seeded-error eval and baseline comparison were all added afterwards (commits `e65fc6d`, `78aa5e9`, `8fe537a`). For the current design, numbers and test count, see [README.md](README.md).
+
 Audit date: 2026-11-16. Audited commit: `603956c` (the tip of `feat/oncology-v2`, merged into `main` as PR #4, `24de252`).
 Purpose: a self-contained handoff for an engineer or AI assistant picking this repo up with no prior context.
 
