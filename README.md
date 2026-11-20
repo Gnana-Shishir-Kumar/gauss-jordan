@@ -6,7 +6,7 @@
 
 **Demo video (2–3 min):** <!--DEMO_LINK-->_link to be added_
 
-**Team:** <!--TEAM-->_names / GitHub handles to be added_
+**Team:** [@Gnana-Shishir-Kumar](https://github.com/Gnana-Shishir-Kumar) · [@pjsk02](https://github.com/pjsk02)
 
 > **Clinician-support tool.** This brief summarizes published and public information to support a clinician's professional judgment and independent review. It is not for patients and does not give patient-specific recommendations. Use limits: clinician-facing only; not for patients; not for urgent or time-critical decisions; no patient data; page text only (figures, image tables and supplements are not read).
 
@@ -109,7 +109,7 @@ No bottom line is produced without verified items, and the CLI exits with code 3
 
 ## License
 
-<!--LICENSE-->_To be added (the hackathon template uses MIT)._
+MIT — see [LICENSE](LICENSE).
 
 ---
 
